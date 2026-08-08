@@ -1,4 +1,5 @@
-import { CLIENT_VERSION, currentToken, sessionStart } from './api.ts'
+import { CLIENT_VERSION, currentToken, isOk, refresh, sessionStart } from './api.ts'
+import type { Credentials } from './store.ts'
 import { findRepo } from './git.ts'
 import { repoIdFor } from './repo-id.ts'
 import { readBundle, readSession, writeBundle, writeSession } from './store.ts'
@@ -64,22 +65,18 @@ export async function beginSession(opts: {
   }
 
   const cached = readBundle()
-  let res = await sessionStart(creds.apiUrl, creds.accessToken, {
-    agent: AGENT,
-    sessionId: opts.sessionId,
-    clientVersion: CLIENT_VERSION,
-    bundleEtag: cached?.etag ?? null,
-  })
+  let attempt = await runHandshake(creds, opts.sessionId, cached?.etag ?? null)
+  let res = attempt.res
   let bundleSource: BeginResult['bundleSource'] = 'none'
 
-  if (res.status !== 200 || !res.body) {
+  if (!isOk(res.status) || !res.body) {
     // A handshake that did not answer is not a reason to guess. Inert, quietly,
     // and the next session tries again.
     return finish({ ...base, inertReason: `handshake unavailable (${res.status})` }, null, 'none')
   }
 
-  let handshake = res.body
-  let bundle: PolicyBundle | null = handshake.bundle
+  let answer = res.body
+  let bundle: PolicyBundle | null = answer.bundle
 
   if (bundle) {
     writeBundle(bundle)
@@ -94,43 +91,60 @@ export async function beginSession(opts: {
     // shape a stale or hand-edited etag produces, and the failure is silent:
     // no classifier means every pathClass is null and every scorer starves. So
     // ask once more with no etag rather than run blind.
-    res = await sessionStart(creds.apiUrl, creds.accessToken, {
-      agent: AGENT,
-      sessionId: opts.sessionId,
-      clientVersion: CLIENT_VERSION,
-      bundleEtag: null,
-    })
-    if (res.status === 200 && res.body?.bundle) {
-      handshake = res.body
-      bundle = res.body.bundle
-      writeBundle(bundle)
+    attempt = await runHandshake(attempt.creds, opts.sessionId, null)
+    res = attempt.res
+    const refetched = isOk(res.status) ? res.body?.bundle : null
+    if (res.body && refetched) {
+      answer = res.body
+      bundle = refetched
+      writeBundle(refetched)
       bundleSource = 'refetched'
     }
   }
 
   const state: SessionState = {
     ...base,
-    killSwitch: handshake.killSwitch,
-    dryRun: handshake.dryRun,
-    dryRunEndsAt: handshake.dryRunEndsAt,
+    killSwitch: answer.killSwitch,
+    dryRun: answer.dryRun,
+    dryRunEndsAt: answer.dryRunEndsAt,
   }
 
-  if (handshake.killSwitch) {
-    return finish({ ...state, inertReason: 'kill switch is on for this organisation' }, handshake, bundleSource)
+  if (answer.killSwitch) {
+    return finish({ ...state, inertReason: 'kill switch is on for this organisation' }, answer, bundleSource)
   }
   if (!repoId) {
-    return finish({ ...state, inertReason: 'no git remote here, so this is not an org repository' }, handshake, bundleSource)
+    return finish({ ...state, inertReason: 'no git remote here, so this is not an org repository' }, answer, bundleSource)
   }
   // Fail closed. `includes` on an empty array is false, which is the entire
   // guarantee: an org that registered nothing receives nothing.
-  if (!handshake.repoAllowlist.includes(repoId)) {
-    return finish({ ...state, inertReason: 'this repository is not on the org allowlist' }, handshake, bundleSource)
+  if (!answer.repoAllowlist.includes(repoId)) {
+    return finish({ ...state, inertReason: 'this repository is not on the org allowlist' }, answer, bundleSource)
   }
   if (!bundle) {
-    return finish({ ...state, inertReason: 'no path classifier available' }, handshake, bundleSource)
+    return finish({ ...state, inertReason: 'no path classifier available' }, answer, bundleSource)
   }
 
-  return finish({ ...state, inert: false, inertReason: null }, handshake, bundleSource)
+  return finish({ ...state, inert: false, inertReason: null }, answer, bundleSource)
+}
+
+// `/session/start` carries the same hook token as `/events`, so it 401s the same
+// way, and a 401 there is the ONE failure this surface deliberately shows a
+// client (feature 0028: the client's own credential expiring, not Flueny's
+// infrastructure failing). Without this retry a rejected token makes the client
+// inert for the whole session and every session after it, silently, because
+// `currentToken` only refreshes on the clock and a revoked install still has a
+// clock that says fine.
+async function runHandshake(
+  creds: Credentials,
+  sessionId: string,
+  bundleEtag: string | null,
+): Promise<{ res: Awaited<ReturnType<typeof sessionStart>>; creds: Credentials }> {
+  const req = { agent: AGENT, sessionId, clientVersion: CLIENT_VERSION, bundleEtag }
+  const res = await sessionStart(creds.apiUrl, creds.accessToken, req)
+  if (res.status !== 401) return { res, creds }
+  const renewed = await refresh(creds)
+  if (!renewed) return { res, creds }
+  return { res: await sessionStart(renewed.apiUrl, renewed.accessToken, req), creds: renewed }
 }
 
 function finish(state: SessionState, handshake: SessionStartResponse | null, bundleSource: BeginResult['bundleSource']): BeginResult {

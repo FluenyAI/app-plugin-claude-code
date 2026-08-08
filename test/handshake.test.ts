@@ -176,3 +176,61 @@ test('a handshake that does not answer leaves the client inert rather than guess
     restore()
   }
 })
+
+test('a rejected hook token refreshes and retries rather than going inert forever', async () => {
+  // The failure this catches was found live, not in review: the client thought
+  // its token was valid (the clock said so), the server rejected it, and
+  // beginSession read the 401 as "handshake unavailable". The client then went
+  // inert for that session and every session after it, silently, with a working
+  // refresh token sitting on disk the whole time.
+  connect()
+  forgetBundle()
+  let handshakes = 0
+  const { calls, restore } = captureFetch((url) => {
+    if (url.endsWith('/oauth/token')) {
+      return { status: 200, body: { access_token: 'fresh', refresh_token: 'r2', expires_in: 3600 } }
+    }
+    handshakes += 1
+    return handshakes === 1
+      ? { status: 401, body: { message: 'Invalid or expired hook token' } }
+      : { status: 201, body: handshakeBody({ repoAllowlist: [repoId] }) }
+  })
+  try {
+    const { state } = await beginSession({ sessionId: 'expired-token', cwd: repoDir })
+    assert.equal(state.inert, false, 'a refreshable 401 must not leave the client inert')
+  } finally {
+    restore()
+  }
+  assert.equal(calls.filter((c) => c.url.endsWith('/oauth/token')).length, 1)
+  assert.equal(handshakes, 2)
+})
+
+test('a 401 with no usable refresh token is inert, not a crash', async () => {
+  connect()
+  forgetBundle()
+  const { restore } = captureFetch((url) =>
+    url.endsWith('/oauth/token') ? { status: 400, body: { error: 'invalid_grant' } } : { status: 401, body: {} },
+  )
+  try {
+    const { state } = await beginSession({ sessionId: 'dead-token', cwd: repoDir })
+    assert.equal(state.inert, true)
+    assert.match(state.inertReason ?? '', /handshake unavailable \(401\)/)
+  } finally {
+    restore()
+  }
+})
+
+test('the handshake accepts the 201 NestJS actually returns, not only 200', async () => {
+  // POST /session/start has no explicit @HttpCode on the backend, so it answers
+  // 201. A client that compared the status to 200 would treat every successful
+  // handshake as a failure, which is what happened the first time this ran live.
+  connect()
+  forgetBundle()
+  const { restore } = captureFetch(() => ({ status: 201, body: handshakeBody({ repoAllowlist: [repoId] }) }))
+  try {
+    const { state } = await beginSession({ sessionId: 'created-201', cwd: repoDir })
+    assert.equal(state.inert, false)
+  } finally {
+    restore()
+  }
+})

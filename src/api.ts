@@ -19,6 +19,16 @@ export const DEFAULT_API_URL = 'http://localhost:3011'
 // developer never sees Flueny's infrastructure failing.
 const HOOK_TIMEOUT_MS = 2500
 
+// The backend is NestJS, so a POST with no explicit @HttpCode answers 201, not
+// 200. `/session/start` is one of those and `/oauth/device` is another, while
+// `/events` is an explicit 202 and `/oauth/token` an explicit 200. A client that
+// checked for 200 would read every successful handshake as a failure and go
+// inert forever, which is exactly what happened the first time this ran against a
+// live backend. Nothing here compares a status to a literal.
+export function isOk(status: number): boolean {
+  return status >= 200 && status < 300
+}
+
 export interface HttpResult<T> {
   status: number
   body: T | null
@@ -112,7 +122,7 @@ export async function currentToken(): Promise<Credentials | null> {
 
 export async function refresh(creds: Credentials): Promise<Credentials | null> {
   const res = await exchangeRefreshToken(creds.apiUrl, creds.clientId, creds.refreshToken)
-  if (res.status !== 200 || !res.body?.access_token) return null
+  if (!isOk(res.status) || !res.body?.access_token) return null
   const next: Credentials = {
     ...creds,
     accessToken: res.body.access_token,

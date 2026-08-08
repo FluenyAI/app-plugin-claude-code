@@ -87,9 +87,9 @@ export async function onPostToolUse(payload: RawPayload): Promise<HookOutcome> {
     writeSession(live)
   })
 
-  record(events, 1)
-  enqueue(AGENT, sessionId, events)
-  return { sent: events.length, inert: false, reason: null }
+  const queued = enqueue(AGENT, sessionId, events)
+  record(queued, 1)
+  return { sent: queued.length, inert: false, reason: null }
 }
 
 export async function onStop(payload: RawPayload): Promise<HookOutcome> {
@@ -128,10 +128,13 @@ export async function onStop(payload: RawPayload): Promise<HookOutcome> {
     writeSession(live)
   })
 
-  record(events, 0)
-  enqueue(AGENT, sessionId, events)
+  const queued = enqueue(AGENT, sessionId, events)
+  // A declined tool call is still a tool call this client looked at, and the
+  // receipt's `observed` count is meant to be every one of them. It cannot come
+  // from PostToolUse, which never fires for a decline.
+  record(queued, queued.filter((event) => event.decision === 'rejected').length)
   await flush()
-  return { sent: events.length, inert: false, reason: null }
+  return { sent: queued.length, inert: false, reason: null }
 }
 
 export async function onSessionEnd(payload: RawPayload): Promise<HookOutcome> {
@@ -159,11 +162,11 @@ export async function onSessionEnd(payload: RawPayload): Promise<HookOutcome> {
     writeSession(live)
   })
 
-  record(events, 0)
-  enqueue(AGENT, sessionId, events)
+  const queued = enqueue(AGENT, sessionId, events)
+  record(queued, 0)
   await flush()
   clearSession(sessionId)
-  return { sent: events.length, inert: false, reason: null }
+  return { sent: queued.length, inert: false, reason: null }
 }
 
 // Turns the turn's buffered edits into decisions, now that whether tests ran is

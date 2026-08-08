@@ -6,6 +6,7 @@ import {
   DEFAULT_CLIENT_ID,
   currentToken,
   exchangeDeviceCode,
+  isOk,
   sessionStart,
   startDevice,
 } from './api.ts'
@@ -79,7 +80,7 @@ async function login(argv: string[]): Promise<number> {
   const label = flag(argv, '--label') ?? hostname()
 
   const grant = await startDevice(apiUrl, clientId, AGENT, label)
-  if (grant.status !== 200 || !grant.body) {
+  if (!isOk(grant.status) || !grant.body) {
     say(`Flueny could not start sign-in against ${apiUrl} (${grant.status}).`)
     return 1
   }
@@ -104,7 +105,7 @@ async function login(argv: string[]): Promise<number> {
     }
     await sleep(intervalMs)
     const token = await exchangeDeviceCode(apiUrl, clientId, grant.body.device_code)
-    if (token.status === 200 && token.body?.access_token) {
+    if (isOk(token.status) && token.body?.access_token) {
       writeCredentials({
         apiUrl,
         clientId,

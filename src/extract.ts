@@ -60,6 +60,11 @@ const DECLINE_MARKERS = [
   'the user doesn’t want to proceed',
   "the user doesn't want to take this action",
   'the user doesn’t want to take this action',
+  // The expanded forms. Claude Code writes the contraction today, but this
+  // string is a product decision on somebody else's release train, and a marker
+  // list that only knows one spelling reports a zero rejection rate the week it
+  // changes, with nothing anywhere saying why.
+  'the user does not want to',
   'user rejected',
   'user denied',
   'request interrupted by user',
