@@ -29,8 +29,8 @@ function connect(): void {
 
 test('an eventId already queued is not queued again', () => {
   replaceQueue([])
-  assert.equal(enqueue('claude-code', 's1', [event('a'), event('b')]), 2)
-  assert.equal(enqueue('claude-code', 's1', [event('a'), event('c')]), 1)
+  assert.equal(enqueue('claude-code', 's1', [event('a'), event('b')]).length, 2)
+  assert.equal(enqueue('claude-code', 's1', [event('a'), event('c')]).length, 1)
   assert.deepEqual(
     readQueue().map((r) => r.event.eventId),
     ['a', 'b', 'c'],
@@ -39,7 +39,7 @@ test('an eventId already queued is not queued again', () => {
 
 test('a duplicate inside one call is queued once', () => {
   replaceQueue([])
-  assert.equal(enqueue('claude-code', 's1', [event('dup'), event('dup')]), 1)
+  assert.equal(enqueue('claude-code', 's1', [event('dup'), event('dup')]).length, 1)
   assert.equal(readQueue().length, 1)
 })
 
@@ -158,4 +158,70 @@ test('everything on the wire is a whitelisted field', async () => {
   for (const key of Object.keys(batch.events[0] ?? {})) {
     assert.ok((CODING_EVENT_FIELDS as readonly string[]).includes(key))
   }
+})
+
+// The server was made tolerant on 2026-08-08 (feature 0028, the `/events`
+// tolerance list): over 500 events is TRUNCATED, not refused, and nothing tells
+// the client. The tail is then lost permanently. So the cap is enforced here,
+// and these are the tests that hold it, because no response ever will.
+
+test('a batch stays well inside the 1 MB body limit at the field maxima', () => {
+  const maxed: CodingEvent[] = Array.from({ length: MAX_BATCH }, (_, i) => ({
+    eventId: `${i}`.padStart(200, 'x'), // MaxLength(200)
+    kind: 'edit-decision',
+    at: '2026-08-08T12:34:56.789Z',
+    repoId: `sha256:${'a'.repeat(64)}`,
+    pathClass: 'x'.repeat(64), // MaxLength(64)
+    decision: 'accepted',
+    testsRun: true,
+    subagentCount: 1000,
+    durationMs: 999_999_999,
+  }))
+  const bytes = Buffer.byteLength(JSON.stringify({ agent: 'claude-code', sessionId: 'x'.repeat(200), events: maxed }))
+  assert.ok(bytes < 1_000_000, `${bytes} bytes would be refused by the 1 MB body limit`)
+})
+
+test('the client chunks rather than letting the server truncate the tail', async () => {
+  connect()
+  replaceQueue([])
+  const count = MAX_BATCH * 2 + 1
+  enqueue(
+    'claude-code',
+    's1',
+    Array.from({ length: count }, (_, i) => event(`t${i}`)),
+  )
+  const { calls, restore } = captureFetch(() => ({ status: 202, body: {} }))
+  try {
+    await flush()
+  } finally {
+    restore()
+  }
+  const ids = calls.flatMap((call) => (call.body as { events: CodingEvent[] }).events.map((e) => e.eventId))
+  // Every event reached a request body. A client that posted one oversized batch
+  // would see the same 202 and lose everything after the 500th.
+  assert.equal(new Set(ids).size, count)
+  assert.equal(calls.length, 3)
+})
+
+test('a 5xx is not read as delivery, and a 202 with a garbage body still is', async () => {
+  connect()
+  replaceQueue([])
+  enqueue('claude-code', 's1', [event('server-error')])
+  let broken = captureFetch(() => ({ status: 500, body: {} }))
+  try {
+    assert.equal((await flush()).sent, 0)
+  } finally {
+    broken.restore()
+  }
+  assert.equal(readQueue().length, 1, 'a 5xx must keep the event, not drop it')
+
+  // Ingest answers 202 with an empty body by contract. A client that required a
+  // parseable body would retry forever against a correct server.
+  const empty = captureFetch(() => ({ status: 202, body: null }))
+  try {
+    assert.equal((await flush()).sent, 1)
+  } finally {
+    empty.restore()
+  }
+  assert.equal(readQueue().length, 0)
 })
