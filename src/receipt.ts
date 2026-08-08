@@ -16,8 +16,14 @@ import type { CodingEvent } from './types.ts'
 export function summaryFor(event: CodingEvent): string {
   const where = event.pathClass ? `path class ${event.pathClass}` : 'no classified path'
   switch (event.kind) {
-    case 'edit-decision':
-      return `Agent edit ${event.decision ?? 'recorded'}, ${where}, tests ${event.testsRun ? 'ran' : 'did not run'}`
+    case 'edit-decision': {
+      // `testsRun` is absent on a rejection, because nothing was applied for a
+      // test to check. Rendering absent as "tests did not run" would put a claim
+      // in the receipt that the payload beside it does not make, on the one
+      // surface whose whole job is that the two agree.
+      const tests = event.testsRun === undefined ? '' : `, tests ${event.testsRun ? 'ran' : 'did not run'}`
+      return `Agent edit ${event.decision ?? 'recorded'}, ${where}${tests}`
+    }
     case 'subagent':
       return 'Subagent delegated'
     case 'session-end':
