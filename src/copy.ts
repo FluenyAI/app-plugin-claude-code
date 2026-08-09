@@ -47,12 +47,24 @@ export function setupConnected(opts: { dryRun: boolean; dryRunDays: number; appU
   return render([first, second])
 }
 
-// 2. Dry-run daily receipt (design decision 44).
+// 2. Dry-run daily receipt (design decision 44), corrected by decision 58.
+//
+// The original exemplar read "observed 41 tool calls, would have sent 6 signals",
+// which implies signals are a filtered subset of calls. They are not. One
+// PostToolUse yields a tool-use event and, on an edit, an edit-decision event
+// too, so signals run at roughly twice tool calls and the live receipt printed
+// "observed 27, would have sent 50". A developer who checks that arithmetic and
+// finds it impossible stops trusting the one surface whose entire job is being
+// checkable, which is a worse outcome than not printing a receipt at all.
+//
+// So the ratio framing is gone. What is left is the fact the receipt exists to
+// carry: this is what was looked at, this is what left, and this is what did not.
 export function dailyReceipt(opts: { toolCalls: number; signals: number; blocked: number }): string {
   return render([
-    `Flueny observed ${opts.toolCalls} ${plural(opts.toolCalls, 'tool call')} today. ` +
-      `It would have sent ${opts.signals} ${plural(opts.signals, 'signal')} and blocked ` +
-      `${opts.blocked} ${plural(opts.blocked, 'action')}.`,
+    `Flueny observed ${opts.toolCalls} ${plural(opts.toolCalls, 'tool call')} today ` +
+      `and sent ${opts.signals} derived ${plural(opts.signals, 'signal')}.`,
+    `It blocked ${opts.blocked} ${plural(opts.blocked, 'action')}. ` +
+      'No prompt, no code and no file content left this machine.',
     'See exactly what: flueny dry-run --today',
   ])
 }

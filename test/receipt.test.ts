@@ -69,5 +69,6 @@ test('observed counts raw tool calls and wouldSend counts derived events', () =>
   const receipt = receiptFor(day).split('\n').join(' ')
   assert.match(receipt, /observed 5 tool calls today/)
   // Nothing is enforced in M1, so the zero is measured, not a placeholder.
-  assert.match(receipt, /sent 2 signals and blocked 0 actions/)
+  assert.match(receipt, /sent 2 derived signals/)
+  assert.match(receipt, /blocked 0 actions/)
 })

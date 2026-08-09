@@ -73,9 +73,17 @@ test('the words are the design plan exemplars, reflowed but not rewritten', () =
       'Your prompts and your code never leave this machine. See what is sent: <url>/coding/privacy',
   )
 
+  // Design decision 58 corrected this one. The plan's original exemplar read
+  // "observed 41 tool calls, would have sent 6 signals", which implies signals
+  // are a filtered subset of calls. One PostToolUse yields a tool-use event and,
+  // on an edit, an edit-decision event too, so signals run at about twice tool
+  // calls: the live receipt printed 27 and 50. The numbers here are that measured
+  // pair rather than an invented one, so the exemplar cannot drift back into
+  // describing a model the client does not have.
   assert.equal(
-    flat(dailyReceipt({ toolCalls: 41, signals: 6, blocked: 0 })),
-    'Flueny observed 41 tool calls today. It would have sent 6 signals and blocked 0 actions. ' +
+    flat(dailyReceipt({ toolCalls: 27, signals: 50, blocked: 0 })),
+    'Flueny observed 27 tool calls today and sent 50 derived signals. ' +
+      'It blocked 0 actions. No prompt, no code and no file content left this machine. ' +
       'See exactly what: flueny dry-run --today',
   )
 
@@ -130,5 +138,6 @@ test('a number the product cannot substantiate is not printed', () => {
 
 test('singulars read as English', () => {
   assert.match(dailyReceipt({ toolCalls: 1, signals: 1, blocked: 0 }), /1 tool call today/)
-  assert.match(dailyReceipt({ toolCalls: 1, signals: 1, blocked: 0 }), /sent 1 signal and/)
+  assert.match(dailyReceipt({ toolCalls: 1, signals: 1, blocked: 0 }), /sent 1 derived signal\./)
+  assert.match(dailyReceipt({ toolCalls: 1, signals: 1, blocked: 1 }), /blocked 1 action\./)
 })
