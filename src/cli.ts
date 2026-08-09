@@ -28,6 +28,7 @@ import {
   writeReceiptDay,
 } from './store.ts'
 import { settingsFragment } from './settings.ts'
+import { readsLocallyDeclaration } from './reads.ts'
 
 // `flueny`. Six commands, one of which (`hook`) is what Claude Code calls and the
 // other five of which a developer calls.
@@ -138,6 +139,7 @@ async function afterLogin(apiUrl: string, token: string, verificationUri: string
     sessionId: `setup-${Date.now()}`,
     clientVersion: CLIENT_VERSION,
     bundleEtag: readBundle()?.etag ?? null,
+    readsLocally: readsLocallyDeclaration(),
   })
   const appUrl = originOf(verificationUri)
   const dryRun = res.body?.dryRun ?? false

@@ -65,6 +65,10 @@ export interface SessionStartRequest {
   sessionId: string
   clientVersion: string
   bundleEtag: string | null
+  // Design decision 57's second list, client-declared. The server can enforce
+  // `neverSent`; it can only believe this one, which is why the client says it
+  // and the server echoes it attributed to this agent and clientVersion.
+  readsLocally: string[]
 }
 
 export interface SessionStartResponse {

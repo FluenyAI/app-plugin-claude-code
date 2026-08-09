@@ -5,6 +5,7 @@ import { repoIdFor } from './repo-id.ts'
 import { readBundle, readSession, writeBundle, writeSession } from './store.ts'
 import type { SessionState } from './store.ts'
 import type { AgentId, PolicyBundle, SessionStartResponse } from './types.ts'
+import { readsLocallyDeclaration } from './reads.ts'
 
 // The SessionStart handshake (CEO decision 4A). The client runs on machines
 // Flueny does not control, so the server states on every session whether it
@@ -139,7 +140,13 @@ async function runHandshake(
   sessionId: string,
   bundleEtag: string | null,
 ): Promise<{ res: Awaited<ReturnType<typeof sessionStart>>; creds: Credentials }> {
-  const req = { agent: AGENT, sessionId, clientVersion: CLIENT_VERSION, bundleEtag }
+  const req = {
+    agent: AGENT,
+    sessionId,
+    clientVersion: CLIENT_VERSION,
+    bundleEtag,
+    readsLocally: readsLocallyDeclaration(),
+  }
   const res = await sessionStart(creds.apiUrl, creds.accessToken, req)
   if (res.status !== 401) return { res, creds }
   const renewed = await refresh(creds)
