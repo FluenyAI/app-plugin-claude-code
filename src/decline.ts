@@ -17,10 +17,18 @@ export const DECLINE_MARKERS = [
   'tool use was rejected',
 ] as const
 
-// Bounded on purpose. A decline marker is at the front of a decline, and a tool
-// response can be megabytes of file content that nothing here has any business
-// walking through.
-const SCAN_LIMIT = 4000
+// Bounded on purpose, and bounded tightly.
+//
+// A decline marker is not somewhere in a decline, it is at the front of one: the
+// sentence is the whole response. A wide window turns any result that QUOTES the
+// sentence into a rejection the developer never made, and this repository's own
+// source is the easiest way to produce one. Measured over 4228 real tool results,
+// a window this size found every decline and nothing else, where 4000 found six
+// results that only mentioned one.
+//
+// A tool response can also be megabytes of file content that nothing here has
+// any business walking through.
+const SCAN_LIMIT = 256
 
 const MARKER_BYTES = DECLINE_MARKERS.map((marker) => Buffer.from(marker, 'ascii'))
 
