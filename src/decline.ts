@@ -28,6 +28,12 @@ export const DECLINE_MARKERS = [
 //
 // A tool response can also be megabytes of file content that nothing here has
 // any business walking through.
+//
+// The trade is deliberately asymmetric on the string path. `PostToolUse` mostly
+// does not fire for a decline at all, so this is a backstop for the rare shapes
+// where it does, and anything it misses the transcript sweep still finds at
+// Stop under the same event id. A miss here costs nothing; a false rejection
+// costs a number that is wrong in the flattering direction.
 const SCAN_LIMIT = 256
 
 const MARKER_BYTES = DECLINE_MARKERS.map((marker) => Buffer.from(marker, 'ascii'))
