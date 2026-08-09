@@ -1,5 +1,6 @@
 import { relative, isAbsolute } from 'node:path'
 import { classifyPath } from './classify.ts'
+import { looksDeclined } from './decline.ts'
 
 // Local extraction. This is the point of the whole product.
 //
@@ -52,24 +53,12 @@ const TEST_COMMAND = new RegExp(
   'i',
 )
 
-// The markers Claude Code writes into a tool result when the developer declines
-// or interrupts. Matched against a stringified response, which is read in this
-// function and referenced nowhere after it returns.
-const DECLINE_MARKERS = [
-  "the user doesn't want to proceed",
-  'the user doesn’t want to proceed',
-  "the user doesn't want to take this action",
-  'the user doesn’t want to take this action',
-  // The expanded forms. Claude Code writes the contraction today, but this
-  // string is a product decision on somebody else's release train, and a marker
-  // list that only knows one spelling reports a zero rejection rate the week it
-  // changes, with nothing anywhere saying why.
-  'the user does not want to',
-  'user rejected',
-  'user denied',
-  'request interrupted by user',
-  'tool use was rejected',
-]
+// The decline markers live in decline.ts, which is the single home for them.
+//
+// There were two lists. This one matched a stringified response here, and the
+// transcript sweep needed the same knowledge against raw bytes. Two lists of the
+// same product decision on somebody else's release train is a list that drifts,
+// and the half that drifts silently is the one the rejection rate depends on.
 
 export function extractToolFacts(
   payload: RawPayload,
@@ -104,20 +93,9 @@ export function toRepoRelative(path: string, repoRoot: string | null): string {
   return rel.startsWith('..') ? '' : rel
 }
 
-export function looksDeclined(response: unknown): boolean {
-  if (response === null || response === undefined) return false
-  let text: string
-  try {
-    text = (typeof response === 'string' ? response : JSON.stringify(response)).toLowerCase()
-  } catch {
-    return false
-  }
-  // Bounded on purpose: the marker is at the front of a decline, and a tool
-  // response can be megabytes of file content that this process has no business
-  // walking through.
-  const head = text.slice(0, 4000)
-  return DECLINE_MARKERS.some((marker) => head.includes(marker))
-}
+// Re-exported so the import path callers already use keeps working. The
+// implementation, and the marker list behind it, are in decline.ts.
+export { looksDeclined } from './decline.ts'
 
 function firstString(source: RawPayload, keys: string[]): string | null {
   for (const key of keys) {

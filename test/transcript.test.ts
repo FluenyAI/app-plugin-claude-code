@@ -119,3 +119,83 @@ test('one rejection is reported once even if the result appears twice', () => {
     1,
   )
 })
+
+// Design decision 57's condition, expressed as a test rather than a comment.
+//
+// The transcript came back into scope on one term: tool-use decision records
+// only, and prompt text and assistant response text are never materialised, not
+// even transiently, not even locally. "Never sent" was already covered by
+// redaction.test.ts. This is the stronger claim: never READ.
+//
+// It works by watching the only two places bytes can become a value, a Buffer
+// decode and a JSON parse, for the duration of one sweep, and failing if a
+// sentinel planted in the message bodies ever appears in one. An implementation
+// that decodes a line or parses a record fails this even though its return value
+// would look perfectly clean.
+test('the sweep never materialises prompt or response text, only ids and paths', () => {
+  const secret = 'SENTINEL-e7b41f-NEVER-READ'
+  const path = writeTranscript('never-read.jsonl', [
+    {
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: `${secret} let me refactor the pricing module` },
+          {
+            type: 'tool_use',
+            id: 'toolu_57',
+            name: 'Edit',
+            input: { file_path: `${REPO}/src/auth/session.ts`, new_string: `${secret} in a diff` },
+          },
+        ],
+      },
+    },
+    {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: `${secret} in a follow up prompt` },
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_57',
+            is_error: true,
+            content: `The user doesn't want to proceed with this tool use. ${secret}`,
+          },
+        ],
+      },
+    },
+  ])
+
+  const decoded: string[] = []
+  const realToString = Buffer.prototype.toString
+  const realParse = JSON.parse
+  Buffer.prototype.toString = function (this: Buffer, ...args: unknown[]) {
+    const out = (realToString as (...a: unknown[]) => string).apply(this, args)
+    decoded.push(out)
+    return out
+  } as typeof Buffer.prototype.toString
+  JSON.parse = ((text: string, reviver?: (k: string, v: unknown) => unknown) => {
+    decoded.push(String(text))
+    return realParse(text, reviver)
+  }) as typeof JSON.parse
+
+  let result
+  try {
+    result = sweepTranscript(path, { offset: 0, repoRoot: REPO, classifier: BUNDLE.pathClassifier })
+  } finally {
+    Buffer.prototype.toString = realToString
+    JSON.parse = realParse
+  }
+
+  // The sweep still has to work. A version that reads nothing would pass the
+  // leak assertion below and be useless.
+  assert.deepEqual(result.rejections, [{ toolUseId: 'toolu_57', pathClass: 'auth' }])
+
+  const leaked = decoded.filter((value) => value.includes(secret))
+  assert.deepEqual(
+    leaked,
+    [],
+    `prompt or response text was materialised ${leaked.length} time(s): ${JSON.stringify(leaked.slice(0, 2))}`,
+  )
+})
