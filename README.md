@@ -40,7 +40,7 @@ Requires Node 22.18 or newer. Node runs the TypeScript directly, so there is no 
 ```
 /plugin marketplace add FluenyAI/app-plugin-claude-code
 /plugin install flueny
-/flueny-connect
+/flueny:connect
 ```
 
 That is the whole thing. The plugin declares its own hooks in `hooks/hooks.json`, so
@@ -48,8 +48,8 @@ That is the whole thing. The plugin declares its own hooks in `hooks/hooks.json`
 `/plugin uninstall flueny` removes it cleanly. Paths inside the plugin resolve through
 `${CLAUDE_PLUGIN_ROOT}`, so moving or reinstalling the checkout does not break the hooks.
 
-`/flueny-connect` prints a short code and a link. The link opens the page with the code already
-filled in. `/flueny-status` says whether this machine is actually sending anything, and which
+`/flueny:connect` prints a short code and a link. The link opens the page with the code already
+filled in. `/flueny:status` says whether this machine is actually sending anything, and which
 link in the chain is broken when it is not.
 
 For a repository to produce any signal at all, an admin has to register its git remote:
