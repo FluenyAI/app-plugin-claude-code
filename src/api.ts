@@ -11,7 +11,12 @@ import type {
 
 export const CLIENT_VERSION = '0.1.0-spike.1'
 export const DEFAULT_CLIENT_ID = 'flueny-claude-code'
-export const DEFAULT_API_URL = 'http://localhost:3011'
+// Production. This is only a fallback: `login` prefers --api-url, then
+// FLUENY_API_URL, and every hook afterwards reads the apiUrl stored in the
+// credential, never this constant. It matters for exactly one case, a fresh
+// machine running `flueny login` with no flag, where a localhost default
+// fails against the developer's own laptop and says nothing about why.
+export const DEFAULT_API_URL = 'https://api.flueny.dev'
 
 // Every network call a hook makes is on the developer's critical path, so all of
 // them are bounded. A Flueny outage must cost a couple of seconds once, never a
