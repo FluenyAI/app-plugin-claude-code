@@ -109,6 +109,7 @@ async function login(argv: string[]): Promise<number> {
     if (isOk(token.status) && token.body?.access_token) {
       writeCredentials({
         apiUrl,
+        appUrl: originOf(grant.body.verification_uri),
         clientId,
         accessToken: token.body.access_token,
         refreshToken: token.body.refresh_token,
@@ -192,7 +193,7 @@ async function status(): Promise<number> {
   }
   say('')
   say(receiptFor())
-  const summary = weekly(creds.apiUrl)
+  const summary = weekly(creds.apiUrl, creds.appUrl)
   if (summary) {
     say('')
     say(summary)
@@ -203,7 +204,7 @@ async function status(): Promise<number> {
 // The weekly summary is rendered from the local ledger, so it can only ever
 // state what this machine actually derived. `/coding/signal` stays authoritative
 // (design decision 46); this is additive and says nothing the ledger cannot show.
-function weekly(apiUrl: string): string | null {
+function weekly(apiUrl: string, appUrl?: string): string | null {
   let decisions = 0
   let rejected = 0
   let touchedTests = 0
@@ -219,7 +220,7 @@ function weekly(apiUrl: string): string | null {
     }
   }
   if (decisions === 0) return null
-  return weeklySummary({ rejected, decisions, touchedTests, appUrl: originOf(apiUrl) })
+  return weeklySummary({ rejected, decisions, touchedTests, appUrl: appUrl ?? originOf(apiUrl) })
 }
 
 // ---- dry-run ----

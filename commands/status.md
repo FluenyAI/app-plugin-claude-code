@@ -20,7 +20,7 @@ silent.
 2. Read the result against these links, in order, and report the FIRST broken
    one rather than a summary:
 
-   - **No credential.** The machine has never signed in. Run `/flueny-connect`.
+   - **No credential.** The machine has never signed in. Run `/flueny:connect`.
    - **Handshake failing.** Sign-in exists but the server rejected the session.
      Report the status code verbatim; this is a Flueny problem, not the user's.
    - **Session inert, repository not allowlisted.** The most common case, and

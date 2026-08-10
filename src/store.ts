@@ -23,6 +23,12 @@ import type { AgentId, CodingEvent, PolicyBundle } from './types.ts'
 
 export interface Credentials {
   apiUrl: string
+  // Where the Flueny app lives, which is NOT the API origin. Captured at login
+  // from the device grant's `verification_uri`, because that is the only place
+  // the backend tells the client its own front end. Without it `flueny status`
+  // built links off the API origin and printed a URL that 404s. Optional so a
+  // credential written by an older client still loads.
+  appUrl?: string
   clientId: string
   accessToken: string
   refreshToken: string
