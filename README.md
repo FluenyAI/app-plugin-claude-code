@@ -65,7 +65,7 @@ enterprise pushing managed settings to a fleet.
 
 ```sh
 npm install                                    # typescript, for the typecheck. No runtime deps
-node src/cli.ts login --api-url http://localhost:3011
+node src/cli.ts login                          # add --api-url for a local stack
 node src/cli.ts install                        # prints the hooks block to merge by hand
 ```
 
