@@ -37,19 +37,40 @@ client does not stub one.
 
 Requires Node 22.18 or newer. Node runs the TypeScript directly, so there is no build step.
 
-```sh
-npm install                                    # typescript, for the typecheck. No runtime deps
-node src/cli.ts login --api-url http://localhost:3011
-node src/cli.ts install                        # prints the hooks block
+```
+/plugin marketplace add FluenyAI/app-plugin-claude-code
+/plugin install flueny
+/flueny-connect
 ```
 
-`flueny login` prints a user code and a URL. Open the URL, sign in to Flueny, enter the code.
-Then merge the `hooks` block from `flueny install` into `~/.claude/settings.json` (or into
-`.claude/settings.json` in one repository) and restart Claude Code.
+That is the whole thing. The plugin declares its own hooks in `hooks/hooks.json`, so
+`~/.claude/settings.json` is never edited, there is no JSON to merge by hand, and
+`/plugin uninstall flueny` removes it cleanly. Paths inside the plugin resolve through
+`${CLAUDE_PLUGIN_ROOT}`, so moving or reinstalling the checkout does not break the hooks.
+
+`/flueny-connect` prints a short code and a link. The link opens the page with the code already
+filled in. `/flueny-status` says whether this machine is actually sending anything, and which
+link in the chain is broken when it is not.
 
 For a repository to produce any signal at all, an admin has to register its git remote:
 `PUT /integrations/coding/allowlist`, surfaced in the app at `/coding-governance/operations`.
-An unregistered repository is inert by design, and that is the fail-closed direction.
+An unregistered repository is inert by design, and that is the fail-closed direction. Paste the
+output of `git remote get-url origin` rather than the address in a browser: a custom SSH host
+alias derives a different id, and nothing reports the mismatch.
+
+### Without the plugin
+
+Still supported, and still the right answer for a repository-scoped install or for an
+enterprise pushing managed settings to a fleet.
+
+```sh
+npm install                                    # typescript, for the typecheck. No runtime deps
+node src/cli.ts login --api-url http://localhost:3011
+node src/cli.ts install                        # prints the hooks block to merge by hand
+```
+
+Merging that block into a `settings.json` that already has hooks is the step that goes wrong,
+so back the file up first. The plugin exists to avoid it.
 
 ```sh
 node src/cli.ts status            # what this client is doing, and whether it is inert
