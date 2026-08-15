@@ -14,7 +14,10 @@ it is connected, and prompts and code never leave the machine either way.
    existing credential first:
 
    ```sh
-   sh "${CLAUDE_PLUGIN_ROOT}/hooks/flueny-hook.sh" --version >/dev/null 2>&1
+   sh "${GROK_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/flueny-hook.sh" --version >/dev/null 2>&1
+   ls "${XDG_CONFIG_HOME:-$HOME/.config}/flueny"/credentials*.json 2>/dev/null
+   cat "${XDG_CONFIG_HOME:-$HOME/.config}/flueny/credentials.grok-build.json" 2>/dev/null
+   cat "${XDG_CONFIG_HOME:-$HOME/.config}/flueny/credentials.claude-code.json" 2>/dev/null
    cat "${XDG_CONFIG_HOME:-$HOME/.config}/flueny/credentials.json" 2>/dev/null
    ```
 
@@ -22,10 +25,19 @@ it is connected, and prompts and code never leave the machine either way.
    you are reusing. If it does not, ask the user for their Flueny URL with
    AskUserQuestion rather than guessing one.
 
-2. Start the sign-in. This prints a short code and a link, then waits:
+2. Start the sign-in. This prints a short code and a link, then waits.
+   If you are Grok (or `GROK_PLUGIN_ROOT` is set), pass `--agent grok-build`.
+   Claude Code omits the flag. Use `${GROK_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}`
+   as the plugin root so both hosts resolve the same files.
 
    ```sh
-   node "${CLAUDE_PLUGIN_ROOT}/src/cli.ts" login --api-url <URL>
+   node "${GROK_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/src/cli.ts" login --api-url <URL>
+   ```
+
+   Grok:
+
+   ```sh
+   node "${GROK_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/src/cli.ts" login --agent grok-build --api-url <URL>
    ```
 
    Show the user the code and the link exactly as printed. The link opens a page
@@ -34,7 +46,7 @@ it is connected, and prompts and code never leave the machine either way.
 3. When it returns, confirm the state rather than assuming it worked:
 
    ```sh
-   node "${CLAUDE_PLUGIN_ROOT}/src/cli.ts" status
+   node "${GROK_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/src/cli.ts" status
    ```
 
 4. Report what is actually true. If `status` says the session is inert, say so

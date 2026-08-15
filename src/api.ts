@@ -118,23 +118,24 @@ export function exchangeRefreshToken(
 // that is already holding up a tool call.
 const REFRESH_MARGIN_MS = 60_000
 
-export async function currentToken(): Promise<Credentials | null> {
-  const creds = readCredentials()
+export async function currentToken(agent: AgentId): Promise<Credentials | null> {
+  const creds = readCredentials(agent)
   if (!creds) return null
   if (creds.expiresAt - REFRESH_MARGIN_MS > Date.now()) return creds
-  return refresh(creds)
+  return refresh(creds, agent)
 }
 
-export async function refresh(creds: Credentials): Promise<Credentials | null> {
+export async function refresh(creds: Credentials, agent: AgentId): Promise<Credentials | null> {
   const res = await exchangeRefreshToken(creds.apiUrl, creds.clientId, creds.refreshToken)
   if (!isOk(res.status) || !res.body?.access_token) return null
   const next: Credentials = {
     ...creds,
+    agent,
     accessToken: res.body.access_token,
     refreshToken: res.body.refresh_token ?? creds.refreshToken,
     expiresAt: Date.now() + (res.body.expires_in ?? 3600) * 1000,
   }
-  writeCredentials(next)
+  writeCredentials(next, agent)
   return next
 }
 

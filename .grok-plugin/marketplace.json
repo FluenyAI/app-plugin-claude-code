@@ -1,5 +1,4 @@
 {
-  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "flueny",
   "description": "The Flueny client for Claude Code and Grok. Measures coding fluency from derived signal, with no prompt or code leaving the machine.",
   "owner": {
