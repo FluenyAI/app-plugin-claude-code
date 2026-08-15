@@ -31,8 +31,16 @@ export interface ToolFacts {
   declined: boolean
 }
 
-const EDIT_TOOLS = new Set(['edit', 'write', 'multiedit', 'notebookedit', 'applypatch', 'update'])
-const SUBAGENT_TOOLS = new Set(['task'])
+const EDIT_TOOLS = new Set([
+  'edit',
+  'write',
+  'multiedit',
+  'notebookedit',
+  'applypatch',
+  'update',
+  'search_replace', // Grok's name for Edit / Write / MultiEdit
+])
+const SUBAGENT_TOOLS = new Set(['task', 'spawn_subagent'])
 
 // Deliberately conservative. A false positive here marks an accept as checked
 // when it was not, which inflates Diligence, and an inflated score is worse than
@@ -64,9 +72,13 @@ export function extractToolFacts(
   payload: RawPayload,
   opts: { repoRoot: string | null; classifier: Record<string, string[]> },
 ): ToolFacts {
-  const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : ''
+  const toolName = firstString(payload, ['tool_name', 'toolName']) ?? ''
   const lower = toolName.toLowerCase()
-  const input = isRecord(payload.tool_input) ? payload.tool_input : {}
+  const input = isRecord(payload.tool_input)
+    ? payload.tool_input
+    : isRecord(payload.toolInput)
+      ? payload.toolInput
+      : {}
 
   const rawPath = firstString(input, ['file_path', 'notebook_path', 'path', 'filePath'])
   const pathClass = rawPath ? classifyPath(opts.classifier, toRepoRelative(rawPath, opts.repoRoot)) : null
@@ -79,7 +91,7 @@ export function extractToolFacts(
     isEdit: EDIT_TOOLS.has(lower),
     isTestCommand: command !== null && TEST_COMMAND.test(command),
     pathClass,
-    declined: looksDeclined(payload.tool_response),
+    declined: looksDeclined(payload.tool_response ?? payload.toolResult),
   }
 }
 

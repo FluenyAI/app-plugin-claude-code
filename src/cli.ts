@@ -13,10 +13,12 @@ import {
 import { setupConnected, weeklySummary, wrap } from './copy.ts'
 import { onPostToolUse, onSessionEnd, onSessionStart, onStop } from './hooks.ts'
 import { entriesFor, receiptFor } from './receipt.ts'
-import { AGENT } from './session.ts'
+import { detectAgent } from './session.ts'
+import type { AgentId } from './types.ts'
 import {
   clearCredentials,
   configDir,
+  listCredentialAgents,
   readBundle,
   readCounters,
   readCredentials,
@@ -57,17 +59,23 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
+function agentLabel(agent: AgentId): string {
+  if (agent === 'grok-build') return 'Grok'
+  if (agent === 'claude-code') return 'Claude Code'
+  return agent
+}
+
 function usage(): number {
   say(
     [
-      'flueny, the Flueny client for Claude Code (dogfood spike).',
+      'flueny, the Flueny client for Claude Code and Grok (dogfood spike).',
       '',
-      '  flueny login [--api-url URL] [--label NAME]   connect this machine',
+      '  flueny login [--api-url URL] [--agent AGENT] [--label NAME]',
       '  flueny status                                 what this client is doing',
       '  flueny dry-run --today                        what was sent today, in full',
-      '  flueny install [--print]                      the Claude Code hook settings',
+      '  flueny install [--print]                      the hook settings to merge by hand',
       '  flueny logout                                 forget the credential',
-      '  flueny hook <event>                           called by Claude Code, reads stdin',
+      '  flueny hook <event>                           called by the agent, reads stdin',
     ].join('\n'),
   )
   return 0
@@ -79,8 +87,9 @@ async function login(argv: string[]): Promise<number> {
   const apiUrl = (flag(argv, '--api-url') ?? process.env.FLUENY_API_URL ?? DEFAULT_API_URL).replace(/\/+$/, '')
   const clientId = flag(argv, '--client-id') ?? DEFAULT_CLIENT_ID
   const label = flag(argv, '--label') ?? hostname()
+  const agent = detectAgent(flag(argv, '--agent'))
 
-  const grant = await startDevice(apiUrl, clientId, AGENT, label)
+  const grant = await startDevice(apiUrl, clientId, agent, label)
   if (!isOk(grant.status) || !grant.body) {
     say(`Flueny could not start sign-in against ${apiUrl} (${grant.status}).`)
     return 1
@@ -107,15 +116,19 @@ async function login(argv: string[]): Promise<number> {
     await sleep(intervalMs)
     const token = await exchangeDeviceCode(apiUrl, clientId, grant.body.device_code)
     if (isOk(token.status) && token.body?.access_token) {
-      writeCredentials({
-        apiUrl,
-        appUrl: originOf(grant.body.verification_uri),
-        clientId,
-        accessToken: token.body.access_token,
-        refreshToken: token.body.refresh_token,
-        expiresAt: Date.now() + (token.body.expires_in ?? 3600) * 1000,
-      })
-      return afterLogin(apiUrl, token.body.access_token, grant.body.verification_uri)
+      writeCredentials(
+        {
+          apiUrl,
+          appUrl: originOf(grant.body.verification_uri),
+          clientId,
+          accessToken: token.body.access_token,
+          refreshToken: token.body.refresh_token,
+          expiresAt: Date.now() + (token.body.expires_in ?? 3600) * 1000,
+          agent,
+        },
+        agent,
+      )
+      return afterLogin(apiUrl, token.body.access_token, grant.body.verification_uri, agent)
     }
     // RFC 8628: authorization_pending means keep polling, slow_down means back
     // off. Anything else is terminal and repeating it just wastes the developer's
@@ -134,9 +147,14 @@ async function login(argv: string[]): Promise<number> {
 // The handshake runs once here so the setup line can state the real dry-run
 // window rather than the default from the design plan. "Never print a number the
 // product cannot substantiate" is a rule about this exact sentence.
-async function afterLogin(apiUrl: string, token: string, verificationUri: string): Promise<number> {
+async function afterLogin(
+  apiUrl: string,
+  token: string,
+  verificationUri: string,
+  agent: AgentId,
+): Promise<number> {
   const res = await sessionStart(apiUrl, token, {
-    agent: AGENT,
+    agent,
     sessionId: `setup-${Date.now()}`,
     clientVersion: CLIENT_VERSION,
     bundleEtag: readBundle()?.etag ?? null,
@@ -151,23 +169,37 @@ async function afterLogin(apiUrl: string, token: string, verificationUri: string
     say('Flueny is turned off for your organisation. This client will send nothing.')
   }
   say('')
-  say('Next: flueny install, then restart Claude Code.')
+  say(`Next: flueny install, then restart ${agent === 'grok-build' ? 'Grok' : 'Claude Code'}.`)
   return 0
 }
 
 function logout(): number {
-  clearCredentials()
-  say('The credential on this machine is gone. Flueny will send nothing until you')
-  say('run flueny login again.')
+  const agent = detectAgent()
+  clearCredentials(agent)
+  const remaining = listCredentialAgents()
+  say(`Disconnected ${agentLabel(agent)} on this machine.`)
+  if (remaining.length > 0) {
+    say(`Still connected: ${remaining.map(agentLabel).join(', ')}.`)
+  } else {
+    say('Flueny will send nothing until you run flueny login again.')
+  }
   return 0
 }
 
 // ---- status ----
 
 async function status(): Promise<number> {
-  const creds = readCredentials()
+  const agent = detectAgent()
+  const creds = readCredentials(agent)
+  const others = listCredentialAgents().filter((a) => a !== agent)
   if (!creds) {
-    say('Flueny is not connected on this machine. Run flueny login.')
+    if (others.length > 0) {
+      say(`${agentLabel(agent)} is not connected on this machine.`)
+      say(`Still connected: ${others.map(agentLabel).join(', ')}.`)
+      say(`Run flueny login --agent ${agent} to connect this host.`)
+    } else {
+      say('Flueny is not connected on this machine. Run flueny login.')
+    }
     return 0
   }
   const bundle = readBundle()
@@ -176,6 +208,8 @@ async function status(): Promise<number> {
 
   const lines = [
     `API              ${creds.apiUrl}`,
+    `Agent            ${agentLabel(agent)}`,
+    `Also connected   ${others.length > 0 ? others.map(agentLabel).join(', ') : 'none'}`,
     `Credential       ${creds.expiresAt > Date.now() ? 'valid' : 'expired, refreshes on next hook'}`,
     `Config           ${configDir()}`,
     `Policy bundle    ${bundle ? `etag ${bundle.etag}, schema ${bundle.schemaVersion}` : 'not cached yet'}`,
@@ -186,7 +220,7 @@ async function status(): Promise<number> {
   ]
   say(lines.join('\n'))
 
-  const refreshed = await currentToken()
+  const refreshed = await currentToken(agent)
   if (!refreshed) {
     say('')
     say('The credential could not be refreshed. Run flueny login again.')

@@ -35,6 +35,9 @@ export interface Credentials {
   // Epoch millis. Refreshed proactively, because a 401 mid-session costs a round
   // trip on a hook that is already blocking the developer's tool call.
   expiresAt: number
+  // Which host this token was minted for. Required on new writes. Missing on a
+  // file written before per-agent credentials, which migrate via the JWT claim.
+  agent?: AgentId
 }
 
 export interface SessionState {
@@ -121,21 +124,64 @@ function readJson<T>(path: string): T | null {
 }
 
 // ---- credentials ----
+//
+// One file per agent. Claude Code and Grok share a machine and a repository,
+// and ingest attributes a batch to the hook token's agent, so a single
+// credentials.json made the last login steal the other host's events.
 
-function credentialsPath(): string {
+const KNOWN_AGENTS: AgentId[] = ['claude-code', 'grok-build']
+
+function credentialsPath(agent: AgentId): string {
+  return join(ensureDir(configDir()), `credentials.${agent}.json`)
+}
+
+function legacyCredentialsPath(): string {
   return join(ensureDir(configDir()), 'credentials.json')
 }
 
-export function readCredentials(): Credentials | null {
-  return readJson<Credentials>(credentialsPath())
+export function inferAgentFromToken(accessToken: string): AgentId | null {
+  try {
+    const parts = accessToken.split('.')
+    if (parts.length < 2 || !parts[1]) return null
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as {
+      agent?: unknown
+    }
+    if (payload.agent === 'claude-code' || payload.agent === 'grok-build') return payload.agent
+    return null
+  } catch {
+    return null
+  }
 }
 
-export function writeCredentials(creds: Credentials): void {
-  writePrivate(credentialsPath(), JSON.stringify(creds, null, 2))
+function migrateLegacyCredentials(): void {
+  const legacy = readJson<Credentials>(legacyCredentialsPath())
+  if (!legacy) return
+  const agent = legacy.agent ?? inferAgentFromToken(legacy.accessToken) ?? 'claude-code'
+  const dest = credentialsPath(agent)
+  if (!existsSync(dest)) {
+    writePrivate(dest, JSON.stringify({ ...legacy, agent }, null, 2))
+  }
+  rmSync(legacyCredentialsPath(), { force: true })
 }
 
-export function clearCredentials(): void {
-  rmSync(credentialsPath(), { force: true })
+export function readCredentials(agent: AgentId = 'claude-code'): Credentials | null {
+  migrateLegacyCredentials()
+  return readJson<Credentials>(credentialsPath(agent))
+}
+
+export function writeCredentials(creds: Credentials, agent: AgentId = creds.agent ?? 'claude-code'): void {
+  migrateLegacyCredentials()
+  writePrivate(credentialsPath(agent), JSON.stringify({ ...creds, agent }, null, 2))
+}
+
+export function clearCredentials(agent: AgentId = 'claude-code'): void {
+  migrateLegacyCredentials()
+  rmSync(credentialsPath(agent), { force: true })
+}
+
+export function listCredentialAgents(): AgentId[] {
+  migrateLegacyCredentials()
+  return KNOWN_AGENTS.filter((agent) => existsSync(credentialsPath(agent)))
 }
 
 // ---- policy bundle cache (CEO decision 25A) ----

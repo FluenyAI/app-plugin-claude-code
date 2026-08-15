@@ -37,16 +37,31 @@ client does not stub one.
 
 Requires Node 22.18 or newer. Node runs the TypeScript directly, so there is no build step.
 
+Claude Code:
+
 ```
 /plugin marketplace add FluenyAI/app-plugin-claude-code
 /plugin install flueny
 /flueny:connect
 ```
 
+Grok (terminal, then restart Grok or press `r` in `/plugins`):
+
+```
+grok plugin marketplace add FluenyAI/app-plugin-claude-code
+grok plugin install flueny --trust
+/flueny:connect
+```
+
+`--trust` is required so the plugin's hooks can run. The same plugin reports
+`agent: grok-build` when it is running under Grok, and `claude-code` otherwise.
+Each host keeps its own credential, so both tools can stay connected on one machine.
+
 That is the whole thing. The plugin declares its own hooks in `hooks/hooks.json`, so
-`~/.claude/settings.json` is never edited, there is no JSON to merge by hand, and
-`/plugin uninstall flueny` removes it cleanly. Paths inside the plugin resolve through
-`${CLAUDE_PLUGIN_ROOT}`, so moving or reinstalling the checkout does not break the hooks.
+host settings files are never edited, there is no JSON to merge by hand, and
+uninstalling `flueny` removes it cleanly. Paths inside the plugin resolve through
+`${CLAUDE_PLUGIN_ROOT}` or `${GROK_PLUGIN_ROOT}`, so moving or reinstalling the
+checkout does not break the hooks.
 
 `/flueny:connect` prints a short code and a link. The link opens the page with the code already
 filled in. `/flueny:status` says whether this machine is actually sending anything, and which

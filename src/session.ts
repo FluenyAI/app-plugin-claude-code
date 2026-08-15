@@ -24,7 +24,19 @@ import { readsLocallyDeclaration } from './reads.ts'
 // developer whose org killed it, both get an editor that behaves exactly as if
 // this client were not installed.
 
-export const AGENT: AgentId = 'claude-code'
+// Grok injects GROK_* on every hook and on plugin-owned processes. Claude Code
+// never sets those, so they are a reliable host signal. An explicit --agent
+// flag wins because /flueny:connect runs as a skill, not a hook, and may not
+// inherit the hook environment.
+export function detectAgent(override?: string | null): AgentId {
+  if (override === 'grok-build' || override === 'claude-code') return override
+  if (process.env.GROK_PLUGIN_ROOT || process.env.GROK_SESSION_ID || process.env.GROK_HOOK_EVENT) {
+    return 'grok-build'
+  }
+  return 'claude-code'
+}
+
+export const AGENT: AgentId = detectAgent()
 
 export interface BeginResult {
   state: SessionState
@@ -60,7 +72,7 @@ export async function beginSession(opts: {
     eventSeq: 0,
   }
 
-  const creds = await currentToken()
+  const creds = await currentToken(AGENT)
   if (!creds) {
     return finish({ ...base, inertReason: 'not connected: run flueny login' }, null, 'none')
   }
@@ -149,7 +161,7 @@ async function runHandshake(
   }
   const res = await sessionStart(creds.apiUrl, creds.accessToken, req)
   if (res.status !== 401) return { res, creds }
-  const renewed = await refresh(creds)
+  const renewed = await refresh(creds, AGENT)
   if (!renewed) return { res, creds }
   return { res: await sessionStart(renewed.apiUrl, renewed.accessToken, req), creds: renewed }
 }

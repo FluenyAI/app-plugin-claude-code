@@ -33,4 +33,7 @@ find_node() {
 NODE="$(find_node)"
 [ -n "${NODE:-}" ] || exit 0
 
-exec "$NODE" "${CLAUDE_PLUGIN_ROOT}/src/cli.ts" hook "$1"
+ROOT="${CLAUDE_PLUGIN_ROOT:-${GROK_PLUGIN_ROOT:-}}"
+[ -n "$ROOT" ] || exit 0
+
+exec "$NODE" "$ROOT/src/cli.ts" hook "$1"

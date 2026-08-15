@@ -28,8 +28,8 @@ export interface HookOutcome {
 }
 
 export async function onSessionStart(payload: RawPayload): Promise<HookOutcome> {
-  const sessionId = stringField(payload, 'session_id') ?? `local-${Date.now()}`
-  const cwd = stringField(payload, 'cwd') ?? process.cwd()
+  const sessionId = sessionIdOf(payload)
+  const cwd = cwdOf(payload)
   const { state } = await beginSession({ sessionId, cwd })
   // Anything left from a previous session goes out now, which is the one moment
   // the developer is not waiting on a tool call.
@@ -38,8 +38,8 @@ export async function onSessionStart(payload: RawPayload): Promise<HookOutcome> 
 }
 
 export async function onPostToolUse(payload: RawPayload): Promise<HookOutcome> {
-  const sessionId = stringField(payload, 'session_id') ?? `local-${Date.now()}`
-  const cwd = stringField(payload, 'cwd') ?? process.cwd()
+  const sessionId = sessionIdOf(payload)
+  const cwd = cwdOf(payload)
   const state = await ensureSession(sessionId, cwd)
   if (state.inert) return { sent: 0, inert: true, reason: state.inertReason }
 
@@ -93,9 +93,9 @@ export async function onPostToolUse(payload: RawPayload): Promise<HookOutcome> {
 }
 
 export async function onStop(payload: RawPayload): Promise<HookOutcome> {
-  const sessionId = stringField(payload, 'session_id') ?? `local-${Date.now()}`
-  const cwd = stringField(payload, 'cwd') ?? process.cwd()
-  const transcript = stringField(payload, 'transcript_path')
+  const sessionId = sessionIdOf(payload)
+  const cwd = cwdOf(payload)
+  const transcript = stringField(payload, 'transcript_path', 'transcriptPath')
   const state = await ensureSession(sessionId, cwd)
   if (state.inert) return { sent: 0, inert: true, reason: state.inertReason }
 
@@ -138,8 +138,8 @@ export async function onStop(payload: RawPayload): Promise<HookOutcome> {
 }
 
 export async function onSessionEnd(payload: RawPayload): Promise<HookOutcome> {
-  const sessionId = stringField(payload, 'session_id') ?? `local-${Date.now()}`
-  const cwd = stringField(payload, 'cwd') ?? process.cwd()
+  const sessionId = sessionIdOf(payload)
+  const cwd = cwdOf(payload)
   const state = await ensureSession(sessionId, cwd)
   if (state.inert) {
     clearSession(sessionId)
@@ -198,7 +198,18 @@ function nextSeqId(live: SessionState): string {
   return `seq-${live.eventSeq}`
 }
 
-function stringField(payload: RawPayload, key: string): string | null {
-  const value = payload[key]
-  return typeof value === 'string' && value.length > 0 ? value : null
+function sessionIdOf(payload: RawPayload): string {
+  return stringField(payload, 'session_id', 'sessionId') ?? `local-${Date.now()}`
+}
+
+function cwdOf(payload: RawPayload): string {
+  return stringField(payload, 'cwd', 'workspaceRoot') ?? process.cwd()
+}
+
+function stringField(payload: RawPayload, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = payload[key]
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  return null
 }
