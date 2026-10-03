@@ -5,7 +5,7 @@
 // The command text and file paths it is handed are matched and dropped: none of
 // it is stored, drawn or sent.
 
-import type { Nudge, NudgeKind } from '../types'
+import type { Nudge, NudgeKind, TeamGuidelines } from '../types'
 
 // Mirrors TEST_COMMAND in src/extract.rs. Deliberately conservative for the
 // same reason: a false positive tells someone their edits were tested when
@@ -48,6 +48,9 @@ export type TurnFacts = {
   turn: number
   untestedFiles: number
   contextPercent: number | null
+  // Path classes the turn's edits touched, in the order first touched.
+  touchedClasses?: readonly string[]
+  guidelines?: TeamGuidelines | null
 }
 
 export type NudgeMemory = {
@@ -62,7 +65,8 @@ const isQuiet = (memory: NudgeMemory, kind: NudgeKind, turn: number): boolean =>
 }
 
 // At most one line a turn. Untested edits come first: they are about the work
-// that was just done, where a full context is about the next task.
+// that was just done, where a full context is about the next task. A team
+// guideline (feature 0137) is the gentlest of the three, so it comes last.
 export const pickNudge = (facts: TurnFacts, memory: NudgeMemory): Nudge | null => {
   if (facts.untestedFiles >= UNTESTED_FILES_MIN && !isQuiet(memory, 'untested', facts.turn)) {
     return {
@@ -88,8 +92,35 @@ export const pickNudge = (facts: TurnFacts, memory: NudgeMemory): Nudge | null =
     }
   }
 
+  const section = guidelineFor(facts)
+  if (section !== null && !isQuiet(memory, 'guideline', facts.turn)) {
+    return {
+      kind: 'guideline',
+      text:
+        `Flueny: this turn changed ${section.pathClass} code. Team guideline: ${section.point} ` +
+        '/flueny-guidelines has the rest.',
+    }
+  }
+
   return null
 }
+
+// The first touched path class that has a section. `general` is never a path
+// class, so a general section only reaches Claude's context, not this line.
+const guidelineFor = (facts: TurnFacts): { pathClass: string; point: string } | null => {
+  const sections = facts.guidelines?.sections ?? []
+  const touched = facts.touchedClasses ?? []
+  for (const pathClass of touched) {
+    const point = sections.find(s => s.pathClass === pathClass)?.points[0]
+    if (point !== undefined) {
+      return { pathClass, point: withStop(point) }
+    }
+  }
+
+  return null
+}
+
+const withStop = (point: string): string => (/[.!?]$/.test(point.trim()) ? point.trim() : `${point.trim()}.`)
 
 export const remember = (memory: NudgeMemory, facts: TurnFacts, shown: Nudge | null): NudgeMemory => {
   const percent = facts.contextPercent
