@@ -6,5 +6,14 @@
     "name": "Flueny",
     "email": "support@flueny.ai"
   },
-  "homepage": "https://flueny.ai"
+  "homepage": "https://flueny.ai",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "nudges": {
+      "type": "boolean",
+      "title": "Coaching lines",
+      "description": "Show a short Flueny coaching line under an answer when the turn suggests one, such as changes with no test run. Worked out on this machine, never sent.",
+      "default": true
+    }
+  }
 }

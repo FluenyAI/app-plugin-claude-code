@@ -1,5 +1,8 @@
 {
-  "description": "Flueny's sensor. Extraction runs on this machine and only derived signal is sent: no prompt text, no code, no file contents, no tool output. Every hook is type command for that reason, because an http hook would post the raw payload off the machine. Hooks fail open and print nothing, so a Flueny outage never interferes with a session. PostToolUseFailure is where Claude Code reports a command that exited non-zero, which is how a failing test run is seen; Grok accepts the same event name.",
+  "description": "Flueny's sensor. Extraction runs on this machine and only derived signal is sent: no prompt text, no code, no file contents, no tool output. Every hook is type command for that reason, because an http hook would post the raw payload off the machine. Hooks fail open and print nothing, so a Flueny outage never interferes with a session. PostToolUseFailure is where Claude Code reports a command that exited non-zero, which is how a failing test run is seen; Grok accepts the same event name. The modules entry is the in-session coach (feature 0008, option D), a Claude Code mod that draws and sends nothing off the machine.",
+  "modules": [
+    "./coach.tsx"
+  ],
   "hooks": {
     "SessionStart": [
       {
