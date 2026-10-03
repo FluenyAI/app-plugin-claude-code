@@ -168,6 +168,7 @@ fn begin_attempt(ctx: &Ctx, session_id: &str, cwd: &Path, prior_failures: u32, t
     ctx.store.write_flag("raw-activity", answer.raw_activity_enabled);
     ctx.store
         .write_flag("weekly-limit", answer.weekly_limit_reporting_enabled);
+    sync_guidelines(ctx, &answer, bundle.as_ref());
 
     let state = SessionState {
         kill_switch: answer.kill_switch,
@@ -202,6 +203,21 @@ fn begin_attempt(ctx: &Ctx, session_id: &str, cwd: &Path, prior_failures: u32, t
         }
     };
     finish(ctx, result, Some(answer), bundle_source)
+}
+
+/// Feature 0137. Runs only after a handshake that answered, so an offline
+/// session start keeps the last guidelines. A null bundle (the etag matched)
+/// falls back to the cached bundle, which still carries the digest, so the steady
+/// state rewrites the same file rather than deleting a valid one. Off, killed, or
+/// unpublished all delete it, which is how a policy change reaches the mod.
+fn sync_guidelines(ctx: &Ctx, answer: &SessionStartResponse, bundle: Option<&PolicyBundle>) {
+    let published = bundle.and_then(|b| b.guidelines().map(|g| (g, b)));
+    match published {
+        Some((guidelines, bundle)) if answer.guidelines_enabled && !answer.kill_switch => {
+            ctx.store.write_guidelines(&guidelines, &bundle.path_classifier)
+        }
+        _ => ctx.store.forget_guidelines(),
+    }
 }
 
 /// The handshake request. `readsLocally` is design decision 57's client-declared
@@ -461,6 +477,117 @@ mod tests {
         assert_eq!(result.bundle_source, BundleSource::Refetched);
         assert_eq!(third.calls().len(), 2);
         assert!(!result.state.inert);
+    }
+
+    fn with_guidelines() -> Value {
+        let mut b = bundle();
+        b["etag"] = json!("etag-guided");
+        b["guidelines"] = json!({
+            "etag": "g-1",
+            "publishedAt": "2026-10-03T10:00:00.000Z",
+            "summary": "Small PRs, tests with every change.",
+            "sections": [{ "pathClass": "auth", "title": "Auth", "points": ["Never log tokens."] }]
+        });
+        b
+    }
+
+    #[test]
+    fn published_guidelines_are_written_kept_on_a_cached_etag_and_deleted_when_off() {
+        let env = TestEnv::new();
+        let repo = env.make_repo(REMOTE);
+        let allowed = json!([repo_id_for(REMOTE)]);
+
+        let on = MockServer::start({
+            let allowed = allowed.clone();
+            move |_, _| {
+                Reply::Json(
+                    200,
+                    handshake_body(
+                        json!({ "repoAllowlist": allowed, "bundle": with_guidelines(), "guidelinesEnabled": true }),
+                    ),
+                )
+            }
+        });
+        env.connect(&on.url);
+        begin_session(&env.ctx, "g-1", &repo);
+        let written = env.ctx.store.read_guidelines().expect("guidelines.json written");
+        assert_eq!(written["etag"], "g-1");
+        assert_eq!(written["sections"][0]["points"][0], "Never log tokens.");
+        assert_eq!(written["pathClassifier"]["auth"][0], "**/auth/**");
+
+        // The etag matched, so the server sent no bundle: the cached one still
+        // carries the digest and the file stays.
+        let cached = MockServer::start({
+            let allowed = allowed.clone();
+            move |_, body| {
+                assert_eq!(body["bundleEtag"], "etag-guided");
+                Reply::Json(
+                    200,
+                    handshake_body(json!({ "repoAllowlist": allowed, "bundle": null, "guidelinesEnabled": true })),
+                )
+            }
+        });
+        env.connect(&cached.url);
+        begin_session(&env.ctx, "g-2", &repo);
+        assert_eq!(env.ctx.store.read_guidelines().unwrap()["etag"], "g-1");
+
+        // A failed handshake is no reason to drop them either.
+        let down = MockServer::start(|_, _| Reply::Json(503, json!({})));
+        env.connect(&down.url);
+        begin_session(&env.ctx, "g-3", &repo);
+        assert!(env.ctx.store.read_guidelines().is_some());
+
+        // The policy turned off: the server sends a bundle without guidelines.
+        let off = MockServer::start(move |_, _| {
+            Reply::Json(
+                200,
+                handshake_body(json!({ "repoAllowlist": allowed, "guidelinesEnabled": false })),
+            )
+        });
+        env.connect(&off.url);
+        begin_session(&env.ctx, "g-4", &repo);
+        assert!(env.ctx.store.read_guidelines().is_none());
+    }
+
+    #[test]
+    fn guidelines_flag_off_or_kill_switch_deletes_even_when_the_bundle_carries_them() {
+        for over in [
+            json!({ "guidelinesEnabled": false }),
+            json!({ "guidelinesEnabled": true, "killSwitch": true }),
+        ] {
+            let env = TestEnv::new();
+            let repo = env.make_repo(REMOTE);
+            env.ctx.store.write_guidelines(&Default::default(), &Default::default());
+            let mut body =
+                handshake_body(json!({ "repoAllowlist": [repo_id_for(REMOTE)], "bundle": with_guidelines() }));
+            for (k, v) in over.as_object().unwrap() {
+                body[k] = v.clone();
+            }
+            let server = MockServer::start(move |_, _| Reply::Json(200, body.clone()));
+            env.connect(&server.url);
+            begin_session(&env.ctx, "g-off", &repo);
+            assert!(env.ctx.store.read_guidelines().is_none(), "{over}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_digest_never_costs_the_session_its_classifier() {
+        let env = TestEnv::new();
+        let repo = env.make_repo(REMOTE);
+        let mut b = bundle();
+        b["guidelines"] = json!({ "summary": 42 });
+        let server = MockServer::start(move |_, _| {
+            Reply::Json(
+                200,
+                handshake_body(
+                    json!({ "repoAllowlist": [repo_id_for(REMOTE)], "bundle": b.clone(), "guidelinesEnabled": true }),
+                ),
+            )
+        });
+        env.connect(&server.url);
+        let state = begin_session(&env.ctx, "g-bad", &repo).state;
+        assert!(!state.inert);
+        assert!(env.ctx.store.read_guidelines().is_none());
     }
 
     #[test]
