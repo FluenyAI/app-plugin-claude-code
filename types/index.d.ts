@@ -1,7 +1,7 @@
-// The mod's type contract (feature 0008, option D): the values it keeps in
-// $.state, under the plugin's name.
+// The mod's type contract (feature 0008, option D, and 0137): the values it
+// keeps in $.state, under the plugin's name.
 
-export type NudgeKind = 'untested' | 'context'
+export type NudgeKind = 'untested' | 'context' | 'guideline'
 
 export type Nudge = { kind: NudgeKind; text: string }
 
@@ -21,8 +21,21 @@ export type NudgeState = {
   isContextArmed: boolean
 }
 
+// Feature 0137. The org's published digest, as the binary wrote it to
+// guidelines.json after the handshake.
+export type GuidelineSection = { pathClass: string; title: string; points: string[] }
+
+export type TeamGuidelines = {
+  etag: string
+  publishedAt: string
+  summary: string
+  sections: GuidelineSection[]
+  // pathClass -> glob patterns, first match wins in this order.
+  pathClassifier: [string, string[]][]
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    flueny: { stats: SessionStats; nudges: NudgeState }
+    flueny: { stats: SessionStats; nudges: NudgeState; guidelines: TeamGuidelines | null }
   }
 }

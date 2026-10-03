@@ -53,9 +53,9 @@ pub const READS_LOCALLY: &[LocalRead] = &[
         why: "To notice when an edit puts a file back the way it was before the agent touched it, which counts as a reverted agent edit. The content and the hash both stay here.",
     },
     LocalRead {
-        what: "In Claude Code only: the names of the tools the agent runs, the paths of files it edits, the text of its Bash commands, and how full the context window is",
+        what: "In Claude Code only: the names of the tools the agent runs, the paths of files it edits, the text of its Bash commands, how full the context window is, and Flueny's own guidelines.json",
         site: "hooks/coach.tsx",
-        why: "To show a coaching line under an answer, such as changes with no test run after them, and the /flueny-coach pane. Reduced to counts in memory for the session; the coach makes no network call, and nothing it reads is sent.",
+        why: "To show a coaching line under an answer, such as changes with no test run after them or the team guideline for the code a turn changed, the /flueny-coach and /flueny-guidelines panes, and your team's published guidelines as context for the agent. Edited paths are reduced to a path class in memory; the coach makes no network call, and nothing it reads is sent.",
     },
 ];
 

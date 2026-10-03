@@ -160,9 +160,16 @@ runs in its own process, which can draw in the session. It does two things:
 - **`/flueny-coach`**, a pane of this session's own counts: turns, files edited, test runs, failed
   commands, context fill and the lines shown.
 
-The coach sends nothing. It makes no network, process or file call, which
-`claude plugin validate .claude-plugin/plugin.json` lists for anyone to check, and what it reads is
-declared in `src/reads.rs` like every other local read. The command hooks remain the only sender.
+- **Team guidelines** (feature 0137), when the org has published them and the policy is on for you.
+  The binary writes the digest from the handshake bundle to `guidelines.json` in its config
+  directory, and deletes it when the policy turns off. The coach adds it to Claude's context at the
+  start of each conversation, names the relevant guideline under an answer when a turn changed
+  code it covers (matched by path class, on this machine), and shows it in `/flueny-guidelines`.
+
+The coach sends nothing. It makes no network or process call, and its one file call reads
+`guidelines.json`, which `claude plugin validate .claude-plugin/plugin.json` lists for anyone to
+check. What it reads is declared in `src/reads.rs` like every other local read. The command hooks
+remain the only sender.
 
 Checks, beside the Rust ones:
 
@@ -267,6 +274,7 @@ workflow runs fmt, clippy and the tests on Linux, macOS and Windows.
 | `src/copy.rs` | the terminal strings and the voice rules |
 | `hooks/coach.tsx` | the in-session coach, a Claude Code mod |
 | `hooks/coach-rules.ts` | the coach's thresholds and test-command list |
+| `hooks/guidelines.ts` | the guidelines file, the path classifier port, the context block |
 | `types/index.d.ts` | the coach's state contract |
 | `src/reads.rs` | what the client reads locally, declared |
 | `src/store.rs` | everything this client writes to disk |
