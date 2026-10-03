@@ -147,6 +147,40 @@ How each host reports a command's exit status, established by driving them:
 That is why the plugin registers `PostToolUseFailure` as well: without it, under Claude Code, a
 failing test run never reached the client at all. Grok accepts the same event name.
 
+## The coach inside Claude Code
+
+Claude Code only (v2.1.287 or later), from feature 0008 option D. `hooks/hooks.json` also names
+`hooks/coach.tsx`, a [mod](https://code.claude.com/docs/en/plugins/mods/overview): code Claude Code
+runs in its own process, which can draw in the session. It does two things:
+
+- **A coaching line under an answer**, at most one a turn and the same one at most once every five
+  turns: three or more files changed with no test run after the last change (prose files do not
+  count), or a context window 80% full. Turn it off with the plugin's **Coaching lines** setting in
+  `/config`.
+- **`/flueny-coach`**, a pane of this session's own counts: turns, files edited, test runs, failed
+  commands, context fill and the lines shown.
+
+- **Team guidelines** (feature 0137), when the org has published them and the policy is on for you.
+  The binary writes the digest from the handshake bundle to `guidelines.json` in its config
+  directory, and deletes it when the policy turns off. The coach adds it to Claude's context at the
+  start of each conversation, names the relevant guideline under an answer when a turn changed
+  code it covers (matched by path class, on this machine), and shows it in `/flueny-guidelines`.
+
+The coach sends nothing. It makes no network or process call, and its one file call reads
+`guidelines.json`, which `claude plugin validate .claude-plugin/plugin.json` lists for anyone to
+check. What it reads is declared in `src/reads.rs` like every other local read. The command hooks
+remain the only sender.
+
+Checks, beside the Rust ones:
+
+```sh
+claude plugin validate .claude-plugin/plugin.json
+claude plugin test .
+```
+
+`hooks/coach-rules.ts` holds the thresholds, and its test-command list mirrors `TEST_COMMAND` in
+`src/extract.rs`: change both together.
+
 ## The privacy promise, and where it is held
 
 `src/wire.rs` is the only path to `/events`. It **rebuilds** an outgoing event key by key from a
@@ -238,6 +272,10 @@ workflow runs fmt, clippy and the tests on Linux, macOS and Windows.
 | `src/repo_id.rs` | mirror of the backend's remote normalization contract |
 | `src/classify.rs` | the path classifier from the policy bundle |
 | `src/copy.rs` | the terminal strings and the voice rules |
+| `hooks/coach.tsx` | the in-session coach, a Claude Code mod |
+| `hooks/coach-rules.ts` | the coach's thresholds and test-command list |
+| `hooks/guidelines.ts` | the guidelines file, the path classifier port, the context block |
+| `types/index.d.ts` | the coach's state contract |
 | `src/reads.rs` | what the client reads locally, declared |
 | `src/store.rs` | everything this client writes to disk |
 | `hooks/` | `hooks.json`, the hook wrapper, and the `flueny.sh` launcher |

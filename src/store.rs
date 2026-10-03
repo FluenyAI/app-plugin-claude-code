@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 
-use crate::types::{AgentId, PolicyBundle, ToolActivityEntry};
+use crate::types::{AgentId, BundleGuidelines, PolicyBundle, ToolActivityEntry};
 
 pub const MAX_SEEN_TOOL_USE_IDS: usize = 2000;
 
@@ -56,6 +56,33 @@ impl Store {
 
     pub fn forget_bundle(&self) {
         let _ = fs::remove_file(self.path("bundle.json"));
+    }
+
+    // ---- team guidelines (feature 0137) ----
+    //
+    // The coach mod reads this file; nothing in the binary does. It holds the
+    // org's published digest plus the path classifier, so the mod can match a
+    // guideline to the paths a turn touched without a second source.
+
+    pub fn write_guidelines(&self, guidelines: &BundleGuidelines, path_classifier: &Map<String, Value>) {
+        write_json(
+            &self.path("guidelines.json"),
+            &json!({
+                "etag": guidelines.etag,
+                "publishedAt": guidelines.published_at,
+                "summary": guidelines.summary,
+                "sections": guidelines.sections,
+                "pathClassifier": path_classifier,
+            }),
+        );
+    }
+
+    pub fn read_guidelines(&self) -> Option<Value> {
+        read_json(&self.path("guidelines.json"))
+    }
+
+    pub fn forget_guidelines(&self) {
+        let _ = fs::remove_file(self.path("guidelines.json"));
     }
 
     // ---- opt-in caches (features 0094, 0098, 0109, 0115) ----

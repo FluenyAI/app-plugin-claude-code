@@ -203,6 +203,38 @@ pub struct PolicyBundle {
     // contract, which is why serde_json runs with preserve_order.
     pub path_classifier: serde_json::Map<String, serde_json::Value>,
     pub rules: Vec<serde_json::Value>,
+    // Feature 0137. The org's published team guidelines, present only when the
+    // policy resolves on for this install. Kept as a raw value here and parsed
+    // on use, so a malformed digest can never cost the session its classifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guidelines: Option<serde_json::Value>,
+}
+
+impl PolicyBundle {
+    pub fn guidelines(&self) -> Option<BundleGuidelines> {
+        self.guidelines
+            .as_ref()
+            .filter(|v| v.is_object())
+            .and_then(|v| serde_json::from_value::<BundleGuidelines>(v.clone()).ok())
+    }
+}
+
+/// Feature 0137. Org-authored text that flows server to client only.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleGuidelines {
+    pub etag: String,
+    pub published_at: String,
+    pub summary: String,
+    pub sections: Vec<GuidelineSection>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuidelineSection {
+    pub path_class: String,
+    pub title: String,
+    pub points: Vec<String>,
 }
 
 /// The handshake answer. Every opt-in flag is read fail closed: absent or
@@ -218,6 +250,7 @@ pub struct SessionStartResponse {
     pub live_feedback_enabled: bool,
     pub raw_activity_enabled: bool,
     pub weekly_limit_reporting_enabled: bool,
+    pub guidelines_enabled: bool,
 }
 
 impl SessionStartResponse {
@@ -241,6 +274,7 @@ impl SessionStartResponse {
             live_feedback_enabled: flag("liveFeedbackEnabled"),
             raw_activity_enabled: flag("rawActivityEnabled"),
             weekly_limit_reporting_enabled: flag("weeklyLimitReportingEnabled"),
+            guidelines_enabled: flag("guidelinesEnabled"),
         })
     }
 }
