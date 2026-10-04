@@ -20,7 +20,7 @@ use crate::context::Ctx;
 use crate::decline::looks_declined;
 use crate::extract::{
     BashResult, Payload, ToolFacts, bash_result, command_in, duration_ms, edit_texts, extract_tool_facts, file_path_in,
-    original_content, to_repo_relative, tool_input,
+    live_feedback_category, original_content, to_repo_relative, tool_input,
 };
 use crate::prompt_insight::sweep_prompt_insight_turns;
 use crate::queue::{enqueue, flush};
@@ -136,7 +136,7 @@ pub fn on_post_tool_use(ctx: &Ctx, payload: &Value, failure: bool) -> HookOutcom
 
         if live.turn_tool_activity.len() < MAX_TURN_TOOL_ACTIVITY {
             live.turn_tool_activity.push(ToolActivityEntry {
-                tool_category: facts.tool_category.to_string(),
+                tool_category: live_feedback_category(facts.tool_category).to_string(),
                 path_class: facts.path_class.clone(),
                 raw_path: facts.raw_path.clone(),
                 raw_command: facts.raw_command.clone(),

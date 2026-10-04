@@ -40,9 +40,10 @@ pub struct ToolFacts {
     pub path_class: Option<String>,
     // A tool_response that says the developer declined.
     pub declined: bool,
-    // Feature 0108. Six fixed values, never the raw tool name.
+    // Feature 0108, widened by 0149. A fixed value, never the raw tool name.
     pub tool_category: &'static str,
-    // Feature 0108. Only meaningful when tool_category is bash.
+    // Feature 0108, widened by 0149. Only set when tool_category is bash: test,
+    // git, build, install or other.
     pub command_category: Option<&'static str>,
     // Feature 0109. Present only under the raw-activity opt-in.
     pub raw_path: Option<String>,
@@ -64,8 +65,19 @@ const EDIT_TOOLS: &[&str] = &[
     "search_replace", // Grok's name for Edit / Write / MultiEdit
 ];
 const SUBAGENT_TOOLS: &[&str] = &["task", "agent", "spawn_subagent"];
-const READ_TOOLS: &[&str] = &["read", "read_file", "cat", "view"];
-const BASH_TOOLS: &[&str] = &["bash", "shell", "terminal", "run_terminal_cmd", "run_terminal_command"];
+const READ_TOOLS: &[&str] = &["read", "read_file", "cat", "view", "notebookread", "read_many_files"];
+// Feature 0149: reading a background shell's output or stopping it is shell
+// work too.
+const BASH_TOOLS: &[&str] = &[
+    "bash",
+    "shell",
+    "terminal",
+    "run_terminal_cmd",
+    "run_terminal_command",
+    "bashoutput",
+    "killshell",
+    "killbash",
+];
 const SEARCH_TOOLS: &[&str] = &[
     "grep",
     "glob",
@@ -77,6 +89,38 @@ const SEARCH_TOOLS: &[&str] = &[
     "list_dir",
 ];
 const WEB_TOOLS: &[&str] = &["webfetch", "web_fetch", "websearch", "web_search", "browse"];
+// Feature 0149. Planning the work with the developer rather than doing it: the
+// to-do list, plan mode, and asking the developer a question.
+const PLAN_TOOLS: &[&str] = &[
+    "todowrite",
+    "todo_write",
+    "todoread",
+    "exitplanmode",
+    "enterplanmode",
+    "update_plan",
+    "askuserquestion",
+    "ask_user",
+];
+
+/// Feature 0149. An MCP server's tool, whichever server: the host names them
+/// `mcp__<server>__<tool>`. Only "integration" leaves the machine, never the
+/// server or tool name.
+fn is_mcp_tool(lower: &str) -> bool {
+    lower.starts_with("mcp__") || lower.starts_with("mcp_")
+}
+
+/// Feature 0149. The category a live-feedback submission carries. The server
+/// validates that field strictly (`@IsIn`), so a server without 0149 would
+/// reject the whole submission over `plan` or `integration` and coaching would
+/// stop. Until every server has 0149, those two travel as `other` there, which
+/// every server accepts and the coach reads the same way. Events are not
+/// affected: `/events` drops an unknown category instead of failing.
+pub fn live_feedback_category(category: &'static str) -> &'static str {
+    match category {
+        "plan" | "integration" => "other",
+        other => other,
+    }
+}
 
 fn classify_tool(lower: &str, is_edit: bool) -> &'static str {
     if is_edit {
@@ -89,6 +133,10 @@ fn classify_tool(lower: &str, is_edit: bool) -> &'static str {
         "search"
     } else if WEB_TOOLS.contains(&lower) {
         "web"
+    } else if PLAN_TOOLS.contains(&lower) {
+        "plan"
+    } else if is_mcp_tool(lower) {
+        "integration"
     } else {
         "other"
     }
@@ -121,6 +169,70 @@ static TEST_COMMAND: LazyLock<Regex> = LazyLock::new(|| {
 
 pub fn is_test_command(command: &str) -> bool {
     TEST_COMMAND.is_match(command) || detect_test_command(command).is_some()
+}
+
+// Feature 0149. What kind of shell command this was, for the Companion's tool
+// chart. Only the kind leaves the machine. Test detection above is untouched and
+// always wins, so testsRun and Diligence mean what they meant; after that a
+// compound command takes the first kind that matches, in the order git, build,
+// install.
+static GIT_COMMAND: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(^|[\s;&|(])(git|gh)\s+\S").expect("static regex"));
+
+static BUILD_COMMAND: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        &[
+            r"\b(npm|pnpm|yarn|bun)\s+(run\s+)?(build|lint|typecheck|type-check|tsc|format|fmt|check)\b",
+            r"\bnpx?\s+(tsc|eslint|prettier|biome|next\s+(build|lint)|vite\s+build)\b",
+            r"(^|[\s;&|(])(tsc|eslint|prettier|biome|ruff|black|flake8|mypy|pylint|rubocop|golangci-lint)\b",
+            r"\bcargo\s+(build|check|clippy|fmt)\b",
+            r"\bgo\s+(build|vet)\b",
+            r"\b(mvn|mvnw|gradle|gradlew)\s+(\S+\s+)*(compile|package|build|assemble)\b",
+            r"\bdotnet\s+build\b",
+            r"\bdocker(\s+compose|-compose)?\s+build\b",
+            r"(^|[\s;&|(])make(\s|$)",
+            r"\bswift\s+build\b",
+        ]
+        .map(|p| format!("(?i:{p})"))
+        .join("|"),
+    )
+    .expect("static regex")
+});
+
+static INSTALL_COMMAND: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        &[
+            r"\b(npm|pnpm|bun)\s+(i|install|ci|add)\b",
+            r"\byarn(\s+(install|add)\b|\s*$)",
+            r"\b(pip|pip3|uv\s+pip)\s+install\b",
+            r"\b(uv|poetry|cargo)\s+add\b",
+            r"\b(poetry|bundle|cargo|gem|brew|composer)\s+install\b",
+            r"\bgo\s+(get|mod\s+(download|tidy))\b",
+            r"\bapt(-get)?\s+install\b",
+            r"\bdotnet\s+(add|restore)\b",
+        ]
+        .map(|p| format!("(?i:{p})"))
+        .join("|"),
+    )
+    .expect("static regex")
+});
+
+pub fn command_category(command: Option<&str>, is_test: bool) -> &'static str {
+    if is_test {
+        return "test";
+    }
+    let Some(command) = command else {
+        return "other";
+    };
+    if GIT_COMMAND.is_match(command) {
+        "git"
+    } else if BUILD_COMMAND.is_match(command) {
+        "build"
+    } else if INSTALL_COMMAND.is_match(command) {
+        "install"
+    } else {
+        "other"
+    }
 }
 
 pub fn tool_name(payload: &Payload) -> String {
@@ -184,7 +296,7 @@ pub fn extract_tool_facts(
         path_class,
         declined: looks_declined(tool_response(payload)),
         tool_category,
-        command_category: (tool_category == "bash").then_some(if is_test { "test" } else { "other" }),
+        command_category: (tool_category == "bash").then(|| command_category(command, is_test)),
         raw_path: repo_relative
             .filter(|rel| include_raw && !rel.is_empty())
             .map(|rel| truncate(&rel, MAX_RAW_LENGTH)),
@@ -487,14 +599,14 @@ mod tests {
     }
 
     #[test]
-    fn classifies_tools_into_the_six_buckets() {
+    fn classifies_tools_into_their_buckets() {
         assert_eq!(
             facts(
                 json!({ "toolName": "Bash", "toolInput": { "command": "git status" } }),
                 false
             )
             .command_category,
-            Some("other")
+            Some("git")
         );
         assert_eq!(
             facts(
@@ -526,7 +638,124 @@ mod tests {
         );
         assert_eq!(
             facts(json!({ "toolName": "mcp__server__do", "toolInput": {} }), false).tool_category,
-            "other"
+            "integration"
+        );
+    }
+
+    // Feature 0149.
+    fn tool_of(name: &str) -> &'static str {
+        facts(json!({ "toolName": name, "toolInput": {} }), false).tool_category
+    }
+
+    fn command_of(command: &str) -> Option<&'static str> {
+        facts(
+            json!({ "toolName": "Bash", "toolInput": { "command": command } }),
+            false,
+        )
+        .command_category
+    }
+
+    #[test]
+    fn puts_planning_tools_mcp_tools_and_background_shells_in_their_own_buckets() {
+        for name in [
+            "TodoWrite",
+            "ExitPlanMode",
+            "EnterPlanMode",
+            "AskUserQuestion",
+            "update_plan",
+        ] {
+            assert_eq!(tool_of(name), "plan", "{name}");
+        }
+        for name in [
+            "mcp__github__create_issue",
+            "mcp__claude_ai_Docs__read",
+            "mcp_linear_search",
+        ] {
+            assert_eq!(tool_of(name), "integration", "{name}");
+        }
+        for name in ["BashOutput", "KillShell", "KillBash"] {
+            assert_eq!(tool_of(name), "bash", "{name}");
+        }
+        assert_eq!(tool_of("NotebookRead"), "read");
+        // Still other: nothing about the work is known from the name alone.
+        assert_eq!(tool_of("Skill"), "other");
+        assert_eq!(tool_of("ToolSearch"), "other");
+    }
+
+    #[test]
+    fn splits_shell_commands_into_test_git_build_install_and_other() {
+        for cmd in [
+            "git status",
+            "git commit -m 'x'",
+            "cd app && git push",
+            "gh pr create --fill",
+        ] {
+            assert_eq!(command_of(cmd), Some("git"), "{cmd}");
+        }
+        for cmd in [
+            "npm run build",
+            "npm run lint",
+            "npx tsc --noEmit -p .",
+            "cargo clippy --all-targets -- -D warnings",
+            "cargo build --release",
+            "go vet ./...",
+            "docker build -t app .",
+            "docker compose build backend",
+            "make",
+            "eslint src",
+        ] {
+            assert_eq!(command_of(cmd), Some("build"), "{cmd}");
+        }
+        for cmd in [
+            "npm ci",
+            "npm i react",
+            "pnpm add zod",
+            "pip install -r requirements.txt",
+            "cargo add serde",
+            "brew install jq",
+            "yarn",
+        ] {
+            assert_eq!(command_of(cmd), Some("install"), "{cmd}");
+        }
+        for cmd in [
+            "ls -la",
+            "cat package.json",
+            "curl -s localhost:3001/health",
+            "docker ps",
+            // Starting a stack rebuilds as a side effect, but it is running services.
+            "docker compose up -d --build",
+        ] {
+            assert_eq!(command_of(cmd), Some("other"), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn a_test_run_stays_a_test_whatever_else_the_command_does() {
+        assert_eq!(command_of("npm test"), Some("test"));
+        assert_eq!(command_of("npm run build && npm test"), Some("test"));
+        assert_eq!(command_of("git stash && cargo test"), Some("test"));
+        // Git wins over build in a compound command, as documented.
+        assert_eq!(command_of("git pull && npm run build"), Some("git"));
+    }
+
+    #[test]
+    fn live_feedback_sends_only_categories_every_server_accepts() {
+        assert_eq!(live_feedback_category("plan"), "other");
+        assert_eq!(live_feedback_category("integration"), "other");
+        for kept in ["read", "edit", "bash", "search", "web", "other"] {
+            assert_eq!(live_feedback_category(kept), kept);
+        }
+    }
+
+    #[test]
+    fn only_a_bash_tool_carries_a_command_category() {
+        assert_eq!(
+            facts(
+                json!({ "toolName": "Read", "toolInput": { "command": "git status" } }),
+                false
+            )
+            .command_category,
+            None
         );
     }
 
