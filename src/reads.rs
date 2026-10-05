@@ -78,7 +78,7 @@ mod tests {
         ),
         (
             "src/credentials.rs",
-            "reads only this client's own credential file, the fallback when no OS store exists, and its cached hook token",
+            "reads only this client's own credential file (the macOS default, or the fallback without an OS store) and its cached hook token",
         ),
         (
             "src/git.rs",

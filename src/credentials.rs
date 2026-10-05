@@ -1,10 +1,23 @@
 // The hook token, and where it lives.
 //
-// In the OS credential store: macOS Keychain, Windows Credential Manager, or the
-// Secret Service on Linux. A 0600 file is readable by any process running as the
-// developer, which is a materially weaker promise, so the file is only the
-// fallback for a machine with no store at all (a headless Linux box, a container,
-// a CI runner), and `flueny status` names which one is in use.
+// Windows Credential Manager or the Secret Service on Linux. On macOS, a 0600
+// file in the config directory (0700), the way gh, aws and gcloud keep theirs.
+// `flueny status` names which one is in use.
+//
+// Why not the Keychain on macOS: the binaries are ad hoc signed, so macOS has no
+// stable identity to remember an "Always Allow" against. Every plugin update is a
+// new app to it, sessions are usually more than the hook token's hour apart, and
+// so the first hook of nearly every session asked for the Keychain. A prompt left
+// unanswered for the store timeout dropped that hook's events, which is how a
+// machine went quiet for days. A 0600 file is readable by any process running as
+// the developer, a weaker promise than the Keychain, and the trade was made on
+// purpose (decision of 2026-10-05). `FLUENY_CREDENTIAL_STORE=keychain` keeps the
+// Keychain for anyone who prefers the prompt, and `=file` forces the file
+// anywhere (CI, containers). A machine with no store at all falls back to the file.
+//
+// Migration to the macOS file: a credential an earlier version left in the
+// Keychain is read once (the last prompt), written to the file, and deleted from
+// the Keychain, so nobody has to sign in again.
 //
 // One entry per agent. Claude Code and Grok share a machine and a repository, and
 // ingest attributes a batch to the hook token's agent, so a single credential made
@@ -197,6 +210,14 @@ impl SecretBackend for MemoryBackend {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileReason {
+    /// `FLUENY_CREDENTIAL_STORE=file`, or no OS store on this machine.
+    Forced,
+    /// The macOS default.
+    Default,
+}
+
 /// Where a credential is held, for `flueny status`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Location {
@@ -208,6 +229,10 @@ pub enum Location {
 pub struct CredentialStore {
     store: Store,
     backend: Option<Arc<dyn SecretBackend>>,
+    // File mode only: an OS store an earlier version kept the credential in. Read
+    // once to move it into the file, never written.
+    migrate_from: Option<Arc<dyn SecretBackend>>,
+    file_reason: FileReason,
     // A store read can cost milliseconds (a Keychain lookup is the slowest thing
     // a hook does locally), and one hook can need the token more than once. The
     // process is short lived, so the cache is too.
@@ -219,16 +244,44 @@ impl CredentialStore {
         CredentialStore {
             store,
             backend,
+            migrate_from: None,
+            file_reason: FileReason::Forced,
             cache: Arc::default(),
         }
     }
 
-    /// The OS store, unless `FLUENY_CREDENTIAL_STORE=file` asks for the file, which
-    /// is for CI and for machines where a store prompt is not wanted.
+    /// The file as the store, moving a credential out of `previous` the first
+    /// time one is missing from the file. The macOS default.
+    pub fn file_migrating_from(store: Store, previous: Arc<dyn SecretBackend>) -> CredentialStore {
+        CredentialStore {
+            migrate_from: Some(previous),
+            file_reason: FileReason::Default,
+            ..CredentialStore::new(store, None)
+        }
+    }
+
+    /// `FLUENY_CREDENTIAL_STORE`: `file` forces the file, `keychain` (or `system`)
+    /// forces the OS store. Unset: the file on macOS, the OS store elsewhere.
     pub fn from_env(store: Store) -> CredentialStore {
-        let forced_file = std::env::var("FLUENY_CREDENTIAL_STORE").is_ok_and(|v| v.eq_ignore_ascii_case("file"));
-        let backend: Option<Arc<dyn SecretBackend>> = if forced_file { None } else { Some(Arc::new(OsKeyring)) };
-        CredentialStore::new(store, backend)
+        let choice = std::env::var("FLUENY_CREDENTIAL_STORE").unwrap_or_default();
+        match choice.to_ascii_lowercase().as_str() {
+            "file" => CredentialStore::new(store, None),
+            "keychain" | "system" => CredentialStore::new(store, Some(Arc::new(OsKeyring))),
+            _ if cfg!(target_os = "macos") => CredentialStore::file_migrating_from(store, Arc::new(OsKeyring)),
+            _ => CredentialStore::new(store, Some(Arc::new(OsKeyring))),
+        }
+    }
+
+    /// Why the credential is in a file, for `flueny status` and login. None when
+    /// an OS store is in use.
+    pub fn file_reason(&self) -> Option<&'static str> {
+        if self.backend.is_some() {
+            return None;
+        }
+        Some(match self.file_reason {
+            FileReason::Forced => "because FLUENY_CREDENTIAL_STORE=file asked for it",
+            FileReason::Default => "the macOS default, so the Keychain never prompts",
+        })
     }
 
     fn file_path(&self, agent: AgentId) -> PathBuf {
@@ -284,6 +337,12 @@ impl CredentialStore {
 
     fn read_uncached(&self, agent: AgentId) -> Option<(Credentials, Location)> {
         let file = self.file_path(agent);
+        if self.backend.is_none() {
+            if let Some(creds) = read_json::<Credentials>(&file) {
+                return Some((creds, Location::File(file)));
+            }
+            return self.migrate_into_file(agent);
+        }
         if let Some(backend) = &self.backend {
             match backend.get(agent.as_str()) {
                 Ok(Some(secret)) => {
@@ -339,6 +398,27 @@ impl CredentialStore {
         Location::File(file)
     }
 
+    /// Moves a credential an earlier version kept in the OS store into the file,
+    /// then deletes it from the store. A store that times out (the prompt was
+    /// not answered) leaves everything as it was, so the next hook tries again.
+    fn migrate_into_file(&self, agent: AgentId) -> Option<(Credentials, Location)> {
+        let previous = self.migrate_from.as_ref()?;
+        let secret = previous.get(agent.as_str()).ok().flatten()?;
+        let creds: Credentials = serde_json::from_str(&secret).ok()?;
+        let stored = Credentials {
+            agent: Some(agent),
+            ..creds
+        };
+        let file = self.file_path(agent);
+        write_json(&file, &stored);
+        // Only drop the store's copy once the file really holds it.
+        if read_json::<Credentials>(&file).as_ref() == Some(&stored) {
+            let _ = previous.delete(agent.as_str());
+        }
+        let _ = fs::remove_file(self.token_path(agent));
+        Some((stored, Location::File(file)))
+    }
+
     pub fn clear(&self, agent: AgentId) {
         if let Ok(mut cache) = self.cache.lock() {
             cache.remove(agent.as_str());
@@ -346,6 +426,10 @@ impl CredentialStore {
         self.migrate_legacy();
         if let Some(backend) = &self.backend {
             let _ = backend.delete(agent.as_str());
+        }
+        // Signing out also clears a copy an earlier version left in the store.
+        if let Some(previous) = &self.migrate_from {
+            let _ = previous.delete(agent.as_str());
         }
         let _ = fs::remove_file(self.file_path(agent));
         let _ = fs::remove_file(self.token_path(agent));
@@ -575,6 +659,107 @@ mod tests {
         store.write(&creds("file-token"), AgentId::ClaudeCode);
         assert!(!store.token_path(AgentId::ClaudeCode).exists());
         assert_eq!(store.read_hook_token(AgentId::ClaudeCode), None);
+    }
+
+    // Decision of 2026-10-05: the file is the macOS default, migrating once.
+    fn file_store_over(memory: &MemoryBackend) -> (TempDir, CredentialStore) {
+        let dir = TempDir::new();
+        let store =
+            CredentialStore::file_migrating_from(Store::new(dir.path().join("config")), Arc::new(memory.clone()));
+        (dir, store)
+    }
+
+    #[test]
+    fn a_keychain_credential_moves_into_the_file_once_and_leaves_the_keychain() {
+        let memory = MemoryBackend::default();
+        let stored = serde_json::to_string(&creds("from-keychain")).unwrap();
+        memory.entries.lock().unwrap().insert("claude-code".into(), stored);
+        let (_dir, store) = file_store_over(&memory);
+
+        let (read, location) = store.read_located(AgentId::ClaudeCode).unwrap();
+        assert_eq!(read.access_token, "from-keychain");
+        assert_eq!(read.refresh_token, "from-keychain-refresh");
+        assert!(matches!(location, Location::File(_)));
+        assert!(
+            memory.entries.lock().unwrap().is_empty(),
+            "the Keychain copy is deleted"
+        );
+
+        // A later process never asks the Keychain again: make it unreadable and
+        // the credential still comes from the file.
+        let unavailable = MemoryBackend {
+            unavailable: true,
+            ..Default::default()
+        };
+        let later = CredentialStore::file_migrating_from(store.store.clone(), Arc::new(unavailable));
+        assert_eq!(later.read(AgentId::ClaudeCode).unwrap().access_token, "from-keychain");
+    }
+
+    #[test]
+    fn an_unanswered_keychain_prompt_changes_nothing_and_is_retried() {
+        struct TimesOut;
+        impl SecretBackend for TimesOut {
+            fn name(&self) -> &'static str {
+                "slow store"
+            }
+            fn get(&self, _: &str) -> Result<Option<String>, StoreError> {
+                Err(StoreError::Timeout)
+            }
+            fn set(&self, _: &str, _: &str) -> Result<(), StoreError> {
+                Err(StoreError::Timeout)
+            }
+            fn delete(&self, _: &str) -> Result<(), StoreError> {
+                Err(StoreError::Timeout)
+            }
+        }
+        let dir = TempDir::new();
+        let store = CredentialStore::file_migrating_from(Store::new(dir.path().join("config")), Arc::new(TimesOut));
+        assert_eq!(store.read(AgentId::ClaudeCode), None);
+        assert!(!store.file_path(AgentId::ClaudeCode).exists());
+    }
+
+    #[test]
+    fn the_file_store_writes_one_0600_file_and_no_token_cache() {
+        let memory = MemoryBackend::default();
+        let (_dir, store) = file_store_over(&memory);
+        let location = store.write(&creds("fresh"), AgentId::ClaudeCode);
+        assert!(matches!(location, Location::File(_)));
+        assert!(
+            memory.entries.lock().unwrap().is_empty(),
+            "nothing goes to the Keychain"
+        );
+        assert!(!store.token_path(AgentId::ClaudeCode).exists());
+        assert_eq!(store.read_hook_token(AgentId::ClaudeCode), None);
+        assert_eq!(store.read(AgentId::ClaudeCode).unwrap().refresh_token, "fresh-refresh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(store.file_path(AgentId::ClaudeCode))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert_eq!(
+            store.file_reason(),
+            Some("the macOS default, so the Keychain never prompts")
+        );
+    }
+
+    #[test]
+    fn signing_out_clears_the_file_and_any_keychain_copy() {
+        let memory = MemoryBackend::default();
+        memory
+            .entries
+            .lock()
+            .unwrap()
+            .insert("grok-build".into(), serde_json::to_string(&creds("old")).unwrap());
+        let (_dir, store) = file_store_over(&memory);
+        store.write(&creds("t"), AgentId::ClaudeCode);
+        store.clear(AgentId::ClaudeCode);
+        store.clear(AgentId::GrokBuild);
+        assert_eq!(store.read(AgentId::ClaudeCode), None);
+        assert!(memory.entries.lock().unwrap().is_empty());
     }
 
     #[test]
