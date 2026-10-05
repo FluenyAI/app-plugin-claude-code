@@ -289,11 +289,10 @@ fn after_login(ctx: &Ctx, creds: &Credentials, verification_uri: &str, location:
 }
 
 fn describe_location(ctx: &Ctx, location: &Location) -> String {
-    let why = if ctx.creds.backend_name().is_none() {
-        "because FLUENY_CREDENTIAL_STORE=file asked for it"
-    } else {
-        "because this machine has no OS credential store"
-    };
+    let why = ctx
+        .creds
+        .file_reason()
+        .unwrap_or("because this machine has no OS credential store");
     match location {
         Location::System(name) => format!("the {name}"),
         Location::File(path) => format!("a file readable only by you ({}), {why}", path.display()),
@@ -398,10 +397,10 @@ fn status(ctx: &Ctx) -> i32 {
             "Credential store {}",
             match &location {
                 Location::System(name) => name.to_string(),
-                Location::File(_) if ctx.creds.backend_name().is_none() => {
-                    "a 0600 file, because FLUENY_CREDENTIAL_STORE=file".to_string()
-                }
-                Location::File(_) => "a 0600 file: no OS credential store on this machine".to_string(),
+                Location::File(_) => match ctx.creds.file_reason() {
+                    Some(why) => format!("a 0600 file, {why}"),
+                    None => "a 0600 file: no OS credential store on this machine".to_string(),
+                },
             }
         ),
         format!("Config           {}", store.dir.display()),
