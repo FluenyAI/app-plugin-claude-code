@@ -217,6 +217,68 @@ static INSTALL_COMMAND: LazyLock<Regex> = LazyLock::new(|| {
     .expect("static regex")
 });
 
+// Feature 0154. Five more kinds, after install, in the order run, network,
+// search, inspect, files: the more intentional kind wins, so `ls | grep x` is a
+// search and `rm -rf dist && npm install` an install. These match a command word
+// only at a real segment start (start of the command, or after `;`, `&`, `|`,
+// `(`, a backtick or a newline), optionally behind `sudo`, `env`, `time`,
+// `nohup` or `VAR=value`, so an argument such as `grep -r python .` or
+// `ls ./bin` does not count as the command itself.
+const SEGMENT_START: &str = r"(?:^|[;&|(`\n])\s*(?:(?:sudo|env|time|nohup)\s+|\w+=\S*\s+)*";
+const WORD_END: &str = r"(?:\s|$|[;&|)`])";
+
+fn segment_regex(alternatives: &[&str]) -> Regex {
+    Regex::new(
+        &alternatives
+            .iter()
+            .map(|p| format!("(?i:{SEGMENT_START}(?:{p}))"))
+            .collect::<Vec<_>>()
+            .join("|"),
+    )
+    .expect("static regex")
+}
+
+static RUN_COMMAND: LazyLock<Regex> = LazyLock::new(|| {
+    segment_regex(&[
+        r"node\s+[^\s-]",
+        r"python[23]?(?:\.\d+)?\s+\S",
+        r"ruby\s+\S",
+        r"deno\s+(?:run|task)\b",
+        r"(?:npm|pnpm|yarn|bun)\s+run\s+\S",
+        r"(?:npm|pnpm|yarn|bun)\s+(?:dev|start|serve|preview)\b",
+        r"(?:npx|bunx|pnpm\s+dlx|yarn\s+dlx)\s+\S",
+        r"\./[\w.-]",
+        r"(?:bash|sh|zsh)\s+[^\s-]",
+        r"cargo\s+run\b",
+        r"go\s+run\b",
+        r"docker\s+run\b",
+        r"(?:docker\s+compose|docker-compose)\s+(?:\S+\s+)*?(?:up|run)\b",
+        r"(?:uv|poetry)\s+run\s+\S",
+        r"(?:bundle\s+exec\s+)?rails\s+(?:s|server)\b",
+        r"uvicorn\s",
+        r"flask\s+run\b",
+    ])
+});
+
+static NETWORK_COMMAND: LazyLock<Regex> = LazyLock::new(|| {
+    segment_regex(&[&format!(
+        r"(?:curl|wget|https?|ssh|scp|rsync|ping|dig|nslookup|nc){WORD_END}"
+    )])
+});
+
+static SEARCH_COMMAND: LazyLock<Regex> =
+    LazyLock::new(|| segment_regex(&[&format!(r"(?:grep|egrep|fgrep|rg|find|fd|ag|ack){WORD_END}")]));
+
+static INSPECT_COMMAND: LazyLock<Regex> = LazyLock::new(|| {
+    segment_regex(&[
+        &format!(r"(?:ls|cat|head|tail|less|more|wc|tree|stat|file|pwd|du|jq){WORD_END}"),
+        r"sed\s+(?:-\S+\s+)*-n\b",
+    ])
+});
+
+static FILES_COMMAND: LazyLock<Regex> =
+    LazyLock::new(|| segment_regex(&[&format!(r"(?:mkdir|rm|rmdir|mv|cp|touch|chmod|chown|ln){WORD_END}")]));
+
 pub fn command_category(command: Option<&str>, is_test: bool) -> &'static str {
     if is_test {
         return "test";
@@ -230,6 +292,16 @@ pub fn command_category(command: Option<&str>, is_test: bool) -> &'static str {
         "build"
     } else if INSTALL_COMMAND.is_match(command) {
         "install"
+    } else if RUN_COMMAND.is_match(command) {
+        "run"
+    } else if NETWORK_COMMAND.is_match(command) {
+        "network"
+    } else if SEARCH_COMMAND.is_match(command) {
+        "search"
+    } else if INSPECT_COMMAND.is_match(command) {
+        "inspect"
+    } else if FILES_COMMAND.is_match(command) {
+        "files"
     } else {
         "other"
     }
@@ -717,16 +789,137 @@ mod tests {
         ] {
             assert_eq!(command_of(cmd), Some("install"), "{cmd}");
         }
-        for cmd in [
-            "ls -la",
-            "cat package.json",
-            "curl -s localhost:3001/health",
-            "docker ps",
-            // Starting a stack rebuilds as a side effect, but it is running services.
-            "docker compose up -d --build",
-        ] {
+        for cmd in ["docker ps", "echo done", "cd src", "export FOO=1"] {
             assert_eq!(command_of(cmd), Some("other"), "{cmd}");
         }
+    }
+
+    // Feature 0154.
+    #[test]
+    fn names_run_network_search_inspect_and_files_shell_commands() {
+        let table: &[(&str, &[&str])] = &[
+            (
+                "run",
+                &[
+                    "node scripts/seed.js",
+                    "python3 manage.py migrate",
+                    "python -c 'print(1)'",
+                    "ruby script.rb",
+                    "deno run -A main.ts",
+                    "bun run scripts/gen.ts",
+                    "npm run dev",
+                    "pnpm start",
+                    "yarn preview",
+                    "npm run seed",
+                    "npx prisma migrate dev",
+                    "pnpm dlx create-next-app",
+                    "./scripts-cargo.sh fmt",
+                    "bash scripts/setup.sh",
+                    "sh ./install.sh",
+                    "cargo run --release",
+                    "go run ./cmd/server",
+                    "docker run --rm -it alpine",
+                    // Starting a stack rebuilds as a side effect, but it is running services.
+                    "docker compose up -d --build",
+                    "docker-compose up",
+                    "uvicorn app.main:app --reload",
+                    "flask run",
+                    "rails s",
+                    "bundle exec rails server",
+                    "PORT=3001 node dist/main.js",
+                ],
+            ),
+            (
+                "network",
+                &[
+                    "curl -s localhost:3001/health",
+                    "wget https://example.com/a.tgz",
+                    "http GET :3001/health",
+                    "https example.com",
+                    "ssh deploy@host uptime",
+                    "scp a.txt host:/tmp",
+                    "rsync -av dist/ host:/srv",
+                    "ping -c 1 example.com",
+                    "dig example.com",
+                    "nslookup example.com",
+                    "nc -z localhost 5432",
+                    "curl -s localhost:3001 | jq .",
+                ],
+            ),
+            (
+                "search",
+                &[
+                    "grep -rn TODO src",
+                    "egrep 'a|b' file.txt",
+                    "rg command_category",
+                    "find . -name '*.rs'",
+                    "fd extract",
+                    "ag needle",
+                    "ack needle",
+                    "grep -r python .",
+                    "find . -name '*.tmp' -exec rm {} \\;",
+                ],
+            ),
+            (
+                "inspect",
+                &[
+                    "ls -la",
+                    "ls",
+                    "cat package.json",
+                    "head -n 20 src/main.rs",
+                    "tail -f log.txt",
+                    "less README.md",
+                    "more README.md",
+                    "wc -l src/*.rs",
+                    "tree -L 2",
+                    "stat Cargo.toml",
+                    "file bin/flueny",
+                    "pwd",
+                    "du -sh target",
+                    "jq .version package.json",
+                    "sed -n '1,40p' src/extract.rs",
+                    "ls ./bin",
+                    "cd web; pwd",
+                ],
+            ),
+            (
+                "files",
+                &[
+                    "mkdir -p src/new",
+                    "rm -rf dist",
+                    "rmdir empty",
+                    "mv a.ts b.ts",
+                    "cp .env.example .env",
+                    "touch src/new.rs",
+                    "chmod +x run.sh",
+                    "chown me file",
+                    "ln -s ../a b",
+                    "sudo rm -rf /tmp/x",
+                ],
+            ),
+        ];
+        for (kind, commands) in table {
+            for cmd in *commands {
+                assert_eq!(command_of(cmd), Some(*kind), "{cmd}");
+            }
+        }
+        // Still other: an editing sed, or a command word only as an argument.
+        for cmd in ["sed -i 's/a/b/' f.txt", "echo cat", "echo ls; cd src"] {
+            assert_eq!(command_of(cmd), Some("other"), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn the_more_intentional_shell_kind_wins_in_a_compound_command() {
+        assert_eq!(command_of("ls | grep x"), Some("search"));
+        assert_eq!(command_of("rm -rf dist && npm install"), Some("install"));
+        assert_eq!(command_of("git grep foo"), Some("git"));
+        assert_eq!(command_of("cd web && npm run dev"), Some("run"));
+        assert_eq!(command_of("npm run build"), Some("build"));
+        assert_eq!(command_of("npm run test"), Some("test"));
+        assert_eq!(command_of("mkdir -p out && curl -o out/a https://x"), Some("network"));
+        assert_eq!(command_of("cat a.txt | wc -l"), Some("inspect"));
+        assert_eq!(command_of("cp a b && ls"), Some("inspect"));
     }
 
     #[test]
