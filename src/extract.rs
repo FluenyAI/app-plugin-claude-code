@@ -800,236 +800,38 @@ mod tests {
         assert_eq!(tool_of("ToolSearch"), "other");
     }
 
-    #[test]
-    fn splits_shell_commands_into_test_git_build_install_and_other() {
-        for cmd in [
-            "git status",
-            "git commit -m 'x'",
-            "cd app && git push",
-            "gh pr create --fill",
-        ] {
-            assert_eq!(command_of(cmd), Some("git"), "{cmd}");
-        }
-        for cmd in [
-            "npm run build",
-            "npm run lint",
-            "npx tsc --noEmit -p .",
-            "cargo clippy --all-targets -- -D warnings",
-            "cargo build --release",
-            "go vet ./...",
-            "docker build -t app .",
-            "docker compose build backend",
-            "make",
-            "eslint src",
-        ] {
-            assert_eq!(command_of(cmd), Some("build"), "{cmd}");
-        }
-        for cmd in [
-            "npm ci",
-            "npm i react",
-            "pnpm add zod",
-            "pip install -r requirements.txt",
-            "cargo add serde",
-            "brew install jq",
-            "yarn",
-        ] {
-            assert_eq!(command_of(cmd), Some("install"), "{cmd}");
-        }
-        for cmd in ["docker ps", "echo done", "cd src", "export FOO=1"] {
-            assert_eq!(command_of(cmd), Some("other"), "{cmd}");
-        }
+    // Features 0149 and 0154. The examples live in one file the coach's
+    // TypeScript mirror (hooks/shell-kinds.ts) is tested against too, so the
+    // binary and the coach pane cannot name a command or a secrets file
+    // differently.
+    fn shell_kinds_fixture() -> Value {
+        const MARKER: &str = "SHELL_KINDS_FIXTURE: ShellKindsFixture = ";
+        let text = include_str!("../hooks/shell-kinds.fixture.ts");
+        let start = text.find(MARKER).expect("fixture marker") + MARKER.len();
+        serde_json::from_str(&text[start..]).expect("fixture is plain JSON")
     }
 
-    // Feature 0154.
     #[test]
-    fn names_run_network_search_inspect_and_files_shell_commands() {
-        let table: &[(&str, &[&str])] = &[
-            (
-                "run",
-                &[
-                    "node scripts/seed.js",
-                    "python3 manage.py migrate",
-                    "python -c 'print(1)'",
-                    "ruby script.rb",
-                    "deno run -A main.ts",
-                    "bun run scripts/gen.ts",
-                    "npm run dev",
-                    "pnpm start",
-                    "yarn preview",
-                    "npm run seed",
-                    "npx prisma migrate dev",
-                    "pnpm dlx create-next-app",
-                    "./scripts-cargo.sh fmt",
-                    "bash scripts/setup.sh",
-                    "sh ./install.sh",
-                    "cargo run --release",
-                    "go run ./cmd/server",
-                    "docker run --rm -it alpine",
-                    // Starting a stack rebuilds as a side effect, but it is running services.
-                    "docker compose up -d --build",
-                    "docker-compose up",
-                    "uvicorn app.main:app --reload",
-                    "flask run",
-                    "rails s",
-                    "bundle exec rails server",
-                    "PORT=3001 node dist/main.js",
-                ],
-            ),
-            (
-                "network",
-                &[
-                    "curl -s localhost:3001/health",
-                    "wget https://example.com/a.tgz",
-                    "http GET :3001/health",
-                    "https example.com",
-                    "ssh deploy@host uptime",
-                    "scp a.txt host:/tmp",
-                    "rsync -av dist/ host:/srv",
-                    "ping -c 1 example.com",
-                    "dig example.com",
-                    "nslookup example.com",
-                    "nc -z localhost 5432",
-                    "curl -s localhost:3001 | jq .",
-                ],
-            ),
-            (
-                "search",
-                &[
-                    "grep -rn TODO src",
-                    "egrep 'a|b' file.txt",
-                    "rg command_category",
-                    "find . -name '*.rs'",
-                    "fd extract",
-                    "ag needle",
-                    "ack needle",
-                    "grep -r python .",
-                    "find . -name '*.tmp' -exec rm {} \\;",
-                ],
-            ),
-            (
-                "inspect",
-                &[
-                    "ls -la",
-                    "ls",
-                    "cat package.json",
-                    "head -n 20 src/main.rs",
-                    "tail -f log.txt",
-                    "less README.md",
-                    "more README.md",
-                    "wc -l src/*.rs",
-                    "tree -L 2",
-                    "stat Cargo.toml",
-                    "file bin/flueny",
-                    "pwd",
-                    "du -sh target",
-                    "jq .version package.json",
-                    "sed -n '1,40p' src/extract.rs",
-                    "ls ./bin",
-                    "cd web; pwd",
-                ],
-            ),
-            (
-                "files",
-                &[
-                    "mkdir -p src/new",
-                    "rm -rf dist",
-                    "rmdir empty",
-                    "mv a.ts b.ts",
-                    "cp .env.example .env",
-                    "touch src/new.rs",
-                    "chmod +x run.sh",
-                    "chown me file",
-                    "ln -s ../a b",
-                    "sudo rm -rf /tmp/x",
-                ],
-            ),
-        ];
-        for (kind, commands) in table {
-            for cmd in *commands {
-                assert_eq!(command_of(cmd), Some(*kind), "{cmd}");
-            }
-        }
-        // Still other: an editing sed, or a command word only as an argument.
-        for cmd in ["sed -i 's/a/b/' f.txt", "echo cat", "echo ls; cd src"] {
-            assert_eq!(command_of(cmd), Some("other"), "{cmd}");
+    fn names_shell_commands_as_the_shared_fixture_says() {
+        let fixture = shell_kinds_fixture();
+        let cases = fixture["commandKinds"].as_array().unwrap();
+        assert!(cases.len() > 50);
+        for case in cases {
+            let (cmd, kind) = (case[0].as_str().unwrap(), case[1].as_str().unwrap());
+            assert_eq!(command_of(cmd), Some(kind), "{cmd}");
         }
     }
 
     #[test]
-    fn the_more_intentional_shell_kind_wins_in_a_compound_command() {
-        assert_eq!(command_of("ls | grep x"), Some("search"));
-        assert_eq!(command_of("rm -rf dist && npm install"), Some("install"));
-        assert_eq!(command_of("git grep foo"), Some("git"));
-        assert_eq!(command_of("cd web && npm run dev"), Some("run"));
-        assert_eq!(command_of("npm run build"), Some("build"));
-        assert_eq!(command_of("npm run test"), Some("test"));
-        assert_eq!(command_of("mkdir -p out && curl -o out/a https://x"), Some("network"));
-        assert_eq!(command_of("cat a.txt | wc -l"), Some("inspect"));
-        assert_eq!(command_of("cp a b && ls"), Some("inspect"));
-    }
-
-    // Feature 0154.
-    fn secrets_of(tool: &str, input: Value) -> Option<&'static str> {
-        facts(json!({ "toolName": tool, "toolInput": input }), false).secrets_file
-    }
-
-    #[test]
-    fn flags_a_tool_use_that_touches_a_secrets_file() {
-        for (cmd, kind) in [
-            ("cp ../../app-backend/.env .env", "env"),
-            ("cat .env.local", "env"),
-            ("source .env", "env"),
-            ("docker run --env-file=.env.production app", "env"),
-            ("grep KEY \"apps/web/.env.development\"", "env"),
-            ("ssh -i ~/.ssh/id_ed25519 host", "key"),
-            ("cat server.pem", "key"),
-            ("openssl rsa -in certs/tls.key -check", "key"),
-            ("cat ~/.netrc", "key"),
-            ("scp -i id_rsa a.txt host:/tmp", "key"),
-            // env wins when both appear.
-            ("cat server.pem .env", "env"),
-        ] {
-            assert_eq!(secrets_of("Bash", json!({ "command": cmd })), Some(kind), "{cmd}");
+    fn flags_secrets_files_as_the_shared_fixture_says() {
+        let fixture = shell_kinds_fixture();
+        let cases = fixture["secretsFiles"].as_array().unwrap();
+        assert!(cases.len() > 20);
+        for case in cases {
+            let tool = case["tool"].as_str().unwrap();
+            let got = facts(json!({ "toolName": tool, "toolInput": case["input"] }), false).secrets_file;
+            assert_eq!(got, case["kind"].as_str(), "{case}");
         }
-        assert_eq!(
-            secrets_of("Read", json!({ "file_path": "/repo/.env.production" })),
-            Some("env")
-        );
-        assert_eq!(
-            secrets_of("Edit", json!({ "file_path": "/repo/certs/server.key" })),
-            Some("key")
-        );
-        assert_eq!(secrets_of("Write", json!({ "file_path": "/repo/.env" })), Some("env"));
-    }
-
-    #[test]
-    fn templates_lookalikes_and_public_keys_are_not_secrets_files() {
-        for cmd in [
-            "cat .env.example",
-            "cat .env.sample .env.template .env.dist .env.defaults",
-            "ls src",
-            "echo environment",
-            "vim .envrc",
-            "cat ~/.ssh/id_ed25519.pub",
-            "cat config/env.ts",
-        ] {
-            assert_eq!(secrets_of("Bash", json!({ "command": cmd })), None, "{cmd}");
-        }
-        assert_eq!(secrets_of("Read", json!({ "file_path": "/repo/.env.example" })), None);
-        assert_eq!(secrets_of("Read", json!({ "file_path": "/repo/src/env.rs" })), None);
-        // A command field on a tool that is not a shell is not a command.
-        assert_eq!(secrets_of("Grep", json!({ "command": "cat .env" })), None);
-        // A subagent carries no secretsFile.
-        assert_eq!(secrets_of("Task", json!({ "file_path": "/repo/.env" })), None);
-    }
-
-    #[test]
-    fn a_test_run_stays_a_test_whatever_else_the_command_does() {
-        assert_eq!(command_of("npm test"), Some("test"));
-        assert_eq!(command_of("npm run build && npm test"), Some("test"));
-        assert_eq!(command_of("git stash && cargo test"), Some("test"));
-        // Git wins over build in a compound command, as documented.
-        assert_eq!(command_of("git pull && npm run build"), Some("git"));
     }
 
     #[test]

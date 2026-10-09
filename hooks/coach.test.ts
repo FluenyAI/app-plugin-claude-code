@@ -97,6 +97,78 @@ describe('coaching line under the answer', () => {
   })
 })
 
+describe('secrets files (feature 0154)', () => {
+  test('the first secrets file shows a one-time line that wins over the others', async ($, on) => {
+    engine(on, 90)
+    const first = await turn($, async () => {
+      for (const file_path of ['src/a.ts', 'src/b.ts', 'src/c.ts']) {
+        await $.tool.call({ tool: 'Edit', file_path, old_string: 'x', new_string: 'y' })
+      }
+      await $.tool.call({ tool: 'Bash', command: 'cat .env.local' })
+      await $.tool.call({ tool: 'Read', file_path: '/repo/certs/server.pem' })
+    })
+    expect(first.text).toBe(
+      "Flueny: Claude read .env.local this session. Secrets in the agent's context can end up in " +
+        'logs, commits or prompts. Point it at .env.example instead.',
+    )
+    // Once a session: the next turn gets the line it would have had.
+    const second = await turn($, async () => {
+      await $.tool.call({ tool: 'Bash', command: 'cp ../../app-backend/.env .env' })
+    })
+    expect(second.text).toContain('context is 90% full')
+    expect(second.text).not.toContain('this session. Secrets')
+  })
+
+  test('the line names what was done, and is not repeated', async ($, on) => {
+    engine(on)
+    const done = await turn($, async () => {
+      await $.tool.call({ tool: 'Bash', command: 'cp ../../app-backend/.env .env' })
+    })
+    expect(done.text).toContain('Flueny: Claude copied or moved .env this session.')
+    const again = await turn($, async () => {
+      await $.tool.call({ tool: 'Edit', file_path: '/repo/.env', old_string: 'x', new_string: 'y' })
+    })
+    expect(again.text).toBe('Done.')
+  })
+
+  test('a private key gets the key advice', async ($, on) => {
+    engine(on)
+    const done = await turn($, async () => {
+      await $.tool.call({ tool: 'Bash', command: 'ssh -i ~/.ssh/id_ed25519 host' })
+    })
+    expect(done.text).toBe(
+      "Flueny: Claude touched id_ed25519 this session. Secrets in the agent's context can end up in " +
+        'logs, commits or prompts. Give it a throwaway key instead.',
+    )
+  })
+
+  test('a template is not a secrets file', async ($, on) => {
+    engine(on)
+    const done = await turn($, async () => {
+      await $.tool.call({ tool: 'Bash', command: 'cat .env.example' })
+      await $.tool.call({ tool: 'Read', file_path: '/repo/.env.sample' })
+    })
+    expect(done.text).toBe('Done.')
+  })
+
+  test('with nudges off a secrets file shows no line', { options: { nudges: false } }, async ($, on) => {
+    engine(on)
+    const done = await turn($, async () => {
+      await $.tool.call({ tool: 'Write', file_path: '/repo/.env', content: 'x' })
+    })
+    expect(done.text).toBe('Done.')
+  })
+})
+
+const PANE_PROPS = {
+  title: 'Flueny coach',
+  isFocused: true,
+  bodyColumns: 80,
+  placement: 'dock',
+  scroll: { bodyRows: 30 },
+  view: undefined,
+} as never
+
 describe('/flueny-coach pane', () => {
   for (const surface of ['terminal', 'desktop'] as const) {
     test(`draws this session's counts on ${surface}`, async ($, on) => {
@@ -122,6 +194,32 @@ describe('/flueny-coach pane', () => {
       })
       expect(await ui.find({ type: 'Text', text: 'Nothing in this pane leaves this machine' })).toBeTruthy()
       expect(await ui.find({ type: 'Text', text: '10% full' })).toBeTruthy()
+      expect(await ui.find({ type: 'Text', text: 'Running tests 1 \u00b7 Shell command 1' })).toBeTruthy()
+    })
+
+    test(`shows shell kinds and secrets files in red on ${surface}`, async ($, on) => {
+      engine(on)
+      await turn($, async () => {
+        for (const command of ['ls -la', 'cat .env.local', 'grep -rn TODO src', 'curl -s localhost:3001', 'ls src']) {
+          await $.tool.call({ tool: 'Bash', command })
+        }
+        await $.tool.call({ tool: 'Read', file_path: '/repo/id_ed25519' })
+      })
+      const ui = await $.ui.mount({ plugin: 'flueny', surface, component: 'Pane', requestId: 'flueny-coach', props: PANE_PROPS })
+      expect(
+        await ui.find({ type: 'Text', text: 'Looking at files 3 \u00b7 Network request 1 \u00b7 Searching files 1' }),
+      ).toBeTruthy()
+      const secrets = await ui.find({ type: 'Text', text: /^2$/ })
+      expect(secrets?.props).toMatchObject({ color: 'error', bold: true })
+      expect(await ui.find({ type: 'Text', text: 'Secrets files touched' })).toBeTruthy()
+    })
+
+    test(`shows no secrets in plain text on ${surface}`, async ($, on) => {
+      engine(on)
+      await turn($, async () => {})
+      const ui = await $.ui.mount({ plugin: 'flueny', surface, component: 'Pane', requestId: 'flueny-coach', props: PANE_PROPS })
+      expect(await ui.find({ type: 'Text', text: 'no shell commands yet' })).toBeTruthy()
+      expect(await ui.find({ type: 'Text', text: 'Secrets files touched' })).toBeTruthy()
     })
   }
 })
