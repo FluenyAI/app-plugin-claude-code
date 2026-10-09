@@ -142,6 +142,9 @@ pub struct CodingEvent {
     pub weakened_flags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub weakened_caught: Option<i64>,
+    // Feature 0154, kind 'tool-use'. Only the kind of secrets file, never its path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets_file: Option<String>,
 }
 
 impl CodingEvent {
@@ -163,7 +166,7 @@ impl CodingEvent {
 
 // The whitelist the wire serializer is built from. Nothing outside this list can
 // reach a request body, and the redaction tests are what hold that true.
-pub const CODING_EVENT_FIELDS: [&str; 28] = [
+pub const CODING_EVENT_FIELDS: [&str; 29] = [
     "eventId",
     "kind",
     "at",
@@ -192,7 +195,11 @@ pub const CODING_EVENT_FIELDS: [&str; 28] = [
     "sensitiveUntested",
     "weakenedFlags",
     "weakenedCaught",
+    "secretsFile",
 ];
+
+// Feature 0154. The closed list `secretsFile` is checked against at the wire.
+pub const SECRETS_FILE_KINDS: [&str; 2] = ["env", "key"];
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]

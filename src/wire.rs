@@ -14,7 +14,7 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::types::{AgentId, CODING_EVENT_FIELDS, TEST_OUTCOMES, TEST_RUNNERS, WEAKENED_FLAGS};
+use crate::types::{AgentId, CODING_EVENT_FIELDS, SECRETS_FILE_KINDS, TEST_OUTCOMES, TEST_RUNNERS, WEAKENED_FLAGS};
 
 const MAX_WEAKENED_FLAGS: usize = 8;
 
@@ -36,6 +36,7 @@ pub fn to_wire_event(event: &Value) -> Map<String, Value> {
             },
             "testOutcome" => one_of(value, &TEST_OUTCOMES),
             "testRunner" => one_of(value, &TEST_RUNNERS),
+            "secretsFile" => one_of(value, &SECRETS_FILE_KINDS),
             "testsRun" | "testFirst" | "endedGreen" | "sensitiveUntested" => value.as_bool().map(Value::Bool),
             // Parity with the TS client: any finite number, truncated.
             "subagentCount" | "durationMs" => value
@@ -109,6 +110,23 @@ mod tests {
         let text = serde_json::to_string(&wire).unwrap();
         for poison in ["PROMPTTEXT", "SECRETVALUE", "TOOLRESPONSE", "/Users/someone"] {
             assert!(!text.contains(poison), "wire serializer leaked {poison}");
+        }
+    }
+
+    // Feature 0154.
+    #[test]
+    fn secrets_file_is_sent_as_its_kind_and_anything_else_is_dropped() {
+        for kind in ["env", "key"] {
+            let wire = to_wire_event(&json!({
+                "eventId": "e", "kind": "tool-use", "at": "t", "secretsFile": kind,
+            }));
+            assert_eq!(wire.get("secretsFile"), Some(&json!(kind)));
+        }
+        for smuggled in [json!("../../app-backend/.env"), json!(true), json!(1)] {
+            let wire = to_wire_event(&json!({
+                "eventId": "e", "kind": "tool-use", "at": "t", "secretsFile": smuggled,
+            }));
+            assert_eq!(wire.get("secretsFile"), None);
         }
     }
 

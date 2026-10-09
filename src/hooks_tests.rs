@@ -526,6 +526,38 @@ fn a_tool_call_is_flushed_to_events_within_the_same_post_tool_use() {
     );
 }
 
+// Feature 0154.
+#[test]
+fn a_tool_use_that_touches_a_secrets_file_reaches_events_as_its_kind_only() {
+    let (env, server, repo) = live_env(json!({}));
+    on_post_tool_use(
+        &env.ctx,
+        &json!({ "session_id": "live", "cwd": repo, "tool_name": "Bash", "tool_use_id": "s1",
+            "tool_input": { "command": "cp ../../app-backend/.env SECRETVALUE-dir/.env" } }),
+        false,
+    );
+    on_post_tool_use(
+        &env.ctx,
+        &json!({ "session_id": "live", "cwd": repo, "tool_name": "Read", "tool_use_id": "s2",
+            "tool_input": { "file_path": repo.join("certs/server.pem") } }),
+        false,
+    );
+    on_post_tool_use(
+        &env.ctx,
+        &json!({ "session_id": "live", "cwd": repo, "tool_name": "Read", "tool_use_id": "s3",
+            "tool_input": { "file_path": repo.join("src/app.ts") } }),
+        false,
+    );
+    let events = of_kind(&server, "tool-use");
+    let kinds: Vec<Option<&str>> = events.iter().map(|e| e["secretsFile"].as_str()).collect();
+    assert_eq!(kinds, [Some("env"), Some("key"), None]);
+    assert!(events[2].get("secretsFile").is_none());
+    let everything = server.everything_sent();
+    for leaked in ["app-backend", "SECRETVALUE", "server.pem"] {
+        assert!(!everything.contains(leaked), "the wire carried {leaked}");
+    }
+}
+
 #[test]
 fn a_live_flush_that_cannot_reach_the_backend_does_not_lose_the_event() {
     let env = TestEnv::new();

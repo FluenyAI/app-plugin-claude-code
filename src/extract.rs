@@ -45,6 +45,9 @@ pub struct ToolFacts {
     // Feature 0108, widened by 0149. Only set when tool_category is bash: test,
     // git, build, install or other.
     pub command_category: Option<&'static str>,
+    // Feature 0154. Only on kind tool-use: env or key when the tool use touched
+    // a secrets file. The path and the command it was found in stay here.
+    pub secrets_file: Option<&'static str>,
     // Feature 0109. Present only under the raw-activity opt-in.
     pub raw_path: Option<String>,
     pub raw_command: Option<String>,
@@ -217,6 +220,68 @@ static INSTALL_COMMAND: LazyLock<Regex> = LazyLock::new(|| {
     .expect("static regex")
 });
 
+// Feature 0154. Five more kinds, after install, in the order run, network,
+// search, inspect, files: the more intentional kind wins, so `ls | grep x` is a
+// search and `rm -rf dist && npm install` an install. These match a command word
+// only at a real segment start (start of the command, or after `;`, `&`, `|`,
+// `(`, a backtick or a newline), optionally behind `sudo`, `env`, `time`,
+// `nohup` or `VAR=value`, so an argument such as `grep -r python .` or
+// `ls ./bin` does not count as the command itself.
+const SEGMENT_START: &str = r"(?:^|[;&|(`\n])\s*(?:(?:sudo|env|time|nohup)\s+|\w+=\S*\s+)*";
+const WORD_END: &str = r"(?:\s|$|[;&|)`])";
+
+fn segment_regex(alternatives: &[&str]) -> Regex {
+    Regex::new(
+        &alternatives
+            .iter()
+            .map(|p| format!("(?i:{SEGMENT_START}(?:{p}))"))
+            .collect::<Vec<_>>()
+            .join("|"),
+    )
+    .expect("static regex")
+}
+
+static RUN_COMMAND: LazyLock<Regex> = LazyLock::new(|| {
+    segment_regex(&[
+        r"node\s+[^\s-]",
+        r"python[23]?(?:\.\d+)?\s+\S",
+        r"ruby\s+\S",
+        r"deno\s+(?:run|task)\b",
+        r"(?:npm|pnpm|yarn|bun)\s+run\s+\S",
+        r"(?:npm|pnpm|yarn|bun)\s+(?:dev|start|serve|preview)\b",
+        r"(?:npx|bunx|pnpm\s+dlx|yarn\s+dlx)\s+\S",
+        r"\./[\w.-]",
+        r"(?:bash|sh|zsh)\s+[^\s-]",
+        r"cargo\s+run\b",
+        r"go\s+run\b",
+        r"docker\s+run\b",
+        r"(?:docker\s+compose|docker-compose)\s+(?:\S+\s+)*?(?:up|run)\b",
+        r"(?:uv|poetry)\s+run\s+\S",
+        r"(?:bundle\s+exec\s+)?rails\s+(?:s|server)\b",
+        r"uvicorn\s",
+        r"flask\s+run\b",
+    ])
+});
+
+static NETWORK_COMMAND: LazyLock<Regex> = LazyLock::new(|| {
+    segment_regex(&[&format!(
+        r"(?:curl|wget|https?|ssh|scp|rsync|ping|dig|nslookup|nc){WORD_END}"
+    )])
+});
+
+static SEARCH_COMMAND: LazyLock<Regex> =
+    LazyLock::new(|| segment_regex(&[&format!(r"(?:grep|egrep|fgrep|rg|find|fd|ag|ack){WORD_END}")]));
+
+static INSPECT_COMMAND: LazyLock<Regex> = LazyLock::new(|| {
+    segment_regex(&[
+        &format!(r"(?:ls|cat|head|tail|less|more|wc|tree|stat|file|pwd|du|jq){WORD_END}"),
+        r"sed\s+(?:-\S+\s+)*-n\b",
+    ])
+});
+
+static FILES_COMMAND: LazyLock<Regex> =
+    LazyLock::new(|| segment_regex(&[&format!(r"(?:mkdir|rm|rmdir|mv|cp|touch|chmod|chown|ln){WORD_END}")]));
+
 pub fn command_category(command: Option<&str>, is_test: bool) -> &'static str {
     if is_test {
         return "test";
@@ -230,9 +295,57 @@ pub fn command_category(command: Option<&str>, is_test: bool) -> &'static str {
         "build"
     } else if INSTALL_COMMAND.is_match(command) {
         "install"
+    } else if RUN_COMMAND.is_match(command) {
+        "run"
+    } else if NETWORK_COMMAND.is_match(command) {
+        "network"
+    } else if SEARCH_COMMAND.is_match(command) {
+        "search"
+    } else if INSPECT_COMMAND.is_match(command) {
+        "inspect"
+    } else if FILES_COMMAND.is_match(command) {
+        "files"
     } else {
         "other"
     }
+}
+
+// Feature 0154. Which secrets file a tool use touched, if any, decided here so
+// only the kind leaves the machine. Checked on the tool's file path and on every
+// word of a shell command (split on whitespace, shell operators, `=` and `:`,
+// quotes stripped, basename taken). `env` wins over `key` when both appear.
+const ENV_TEMPLATES: &[&str] = &["example", "sample", "template", "dist", "defaults"];
+const KEY_NAMES: &[&str] = &["id_rsa", "id_ecdsa", "id_ed25519", ".netrc"];
+
+fn secrets_kind_of(word: &str) -> Option<&'static str> {
+    let word = word.trim_matches(|c| c == '\'' || c == '"');
+    let name = word.rsplit(['/', '\\']).next().unwrap_or(word).to_lowercase();
+    if name == ".env" {
+        return Some("env");
+    }
+    if let Some(suffix) = name.strip_prefix(".env.") {
+        return (!suffix.is_empty() && !ENV_TEMPLATES.contains(&suffix)).then_some("env");
+    }
+    let is_key =
+        KEY_NAMES.contains(&name.as_str()) || (name.len() > 4 && (name.ends_with(".pem") || name.ends_with(".key")));
+    is_key.then_some("key")
+}
+
+pub fn secrets_file(path: Option<&str>, command: Option<&str>) -> Option<&'static str> {
+    let words = path.into_iter().chain(
+        command
+            .into_iter()
+            .flat_map(|c| c.split(|ch: char| ch.is_whitespace() || ";&|()<>`=:".contains(ch))),
+    );
+    let mut found = None;
+    for word in words {
+        match secrets_kind_of(word) {
+            Some("env") => return Some("env"),
+            Some(kind) => found = Some(kind),
+            None => {}
+        }
+    }
+    found
 }
 
 pub fn tool_name(payload: &Payload) -> String {
@@ -284,19 +397,24 @@ pub fn extract_tool_facts(
     let is_edit = EDIT_TOOLS.contains(&lower.as_str());
     let tool_category = classify_tool(&lower, is_edit);
     let is_test = command.is_some_and(is_test_command);
+    let kind = if SUBAGENT_TOOLS.contains(&lower.as_str()) {
+        "subagent"
+    } else {
+        "tool-use"
+    };
+    let shell_command = command.filter(|_| tool_category == "bash");
     ToolFacts {
         tool_use_id: first_string(payload, &["tool_use_id", "toolUseId"]).map(str::to_string),
-        kind: if SUBAGENT_TOOLS.contains(&lower.as_str()) {
-            "subagent"
-        } else {
-            "tool-use"
-        },
+        kind,
         is_edit,
         is_test_command: is_test,
         path_class,
         declined: looks_declined(tool_response(payload)),
         tool_category,
         command_category: (tool_category == "bash").then(|| command_category(command, is_test)),
+        secrets_file: (kind == "tool-use")
+            .then(|| secrets_file(file_path_in(input), shell_command))
+            .flatten(),
         raw_path: repo_relative
             .filter(|rel| include_raw && !rel.is_empty())
             .map(|rel| truncate(&rel, MAX_RAW_LENGTH)),
@@ -717,16 +835,192 @@ mod tests {
         ] {
             assert_eq!(command_of(cmd), Some("install"), "{cmd}");
         }
-        for cmd in [
-            "ls -la",
-            "cat package.json",
-            "curl -s localhost:3001/health",
-            "docker ps",
-            // Starting a stack rebuilds as a side effect, but it is running services.
-            "docker compose up -d --build",
-        ] {
+        for cmd in ["docker ps", "echo done", "cd src", "export FOO=1"] {
             assert_eq!(command_of(cmd), Some("other"), "{cmd}");
         }
+    }
+
+    // Feature 0154.
+    #[test]
+    fn names_run_network_search_inspect_and_files_shell_commands() {
+        let table: &[(&str, &[&str])] = &[
+            (
+                "run",
+                &[
+                    "node scripts/seed.js",
+                    "python3 manage.py migrate",
+                    "python -c 'print(1)'",
+                    "ruby script.rb",
+                    "deno run -A main.ts",
+                    "bun run scripts/gen.ts",
+                    "npm run dev",
+                    "pnpm start",
+                    "yarn preview",
+                    "npm run seed",
+                    "npx prisma migrate dev",
+                    "pnpm dlx create-next-app",
+                    "./scripts-cargo.sh fmt",
+                    "bash scripts/setup.sh",
+                    "sh ./install.sh",
+                    "cargo run --release",
+                    "go run ./cmd/server",
+                    "docker run --rm -it alpine",
+                    // Starting a stack rebuilds as a side effect, but it is running services.
+                    "docker compose up -d --build",
+                    "docker-compose up",
+                    "uvicorn app.main:app --reload",
+                    "flask run",
+                    "rails s",
+                    "bundle exec rails server",
+                    "PORT=3001 node dist/main.js",
+                ],
+            ),
+            (
+                "network",
+                &[
+                    "curl -s localhost:3001/health",
+                    "wget https://example.com/a.tgz",
+                    "http GET :3001/health",
+                    "https example.com",
+                    "ssh deploy@host uptime",
+                    "scp a.txt host:/tmp",
+                    "rsync -av dist/ host:/srv",
+                    "ping -c 1 example.com",
+                    "dig example.com",
+                    "nslookup example.com",
+                    "nc -z localhost 5432",
+                    "curl -s localhost:3001 | jq .",
+                ],
+            ),
+            (
+                "search",
+                &[
+                    "grep -rn TODO src",
+                    "egrep 'a|b' file.txt",
+                    "rg command_category",
+                    "find . -name '*.rs'",
+                    "fd extract",
+                    "ag needle",
+                    "ack needle",
+                    "grep -r python .",
+                    "find . -name '*.tmp' -exec rm {} \\;",
+                ],
+            ),
+            (
+                "inspect",
+                &[
+                    "ls -la",
+                    "ls",
+                    "cat package.json",
+                    "head -n 20 src/main.rs",
+                    "tail -f log.txt",
+                    "less README.md",
+                    "more README.md",
+                    "wc -l src/*.rs",
+                    "tree -L 2",
+                    "stat Cargo.toml",
+                    "file bin/flueny",
+                    "pwd",
+                    "du -sh target",
+                    "jq .version package.json",
+                    "sed -n '1,40p' src/extract.rs",
+                    "ls ./bin",
+                    "cd web; pwd",
+                ],
+            ),
+            (
+                "files",
+                &[
+                    "mkdir -p src/new",
+                    "rm -rf dist",
+                    "rmdir empty",
+                    "mv a.ts b.ts",
+                    "cp .env.example .env",
+                    "touch src/new.rs",
+                    "chmod +x run.sh",
+                    "chown me file",
+                    "ln -s ../a b",
+                    "sudo rm -rf /tmp/x",
+                ],
+            ),
+        ];
+        for (kind, commands) in table {
+            for cmd in *commands {
+                assert_eq!(command_of(cmd), Some(*kind), "{cmd}");
+            }
+        }
+        // Still other: an editing sed, or a command word only as an argument.
+        for cmd in ["sed -i 's/a/b/' f.txt", "echo cat", "echo ls; cd src"] {
+            assert_eq!(command_of(cmd), Some("other"), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn the_more_intentional_shell_kind_wins_in_a_compound_command() {
+        assert_eq!(command_of("ls | grep x"), Some("search"));
+        assert_eq!(command_of("rm -rf dist && npm install"), Some("install"));
+        assert_eq!(command_of("git grep foo"), Some("git"));
+        assert_eq!(command_of("cd web && npm run dev"), Some("run"));
+        assert_eq!(command_of("npm run build"), Some("build"));
+        assert_eq!(command_of("npm run test"), Some("test"));
+        assert_eq!(command_of("mkdir -p out && curl -o out/a https://x"), Some("network"));
+        assert_eq!(command_of("cat a.txt | wc -l"), Some("inspect"));
+        assert_eq!(command_of("cp a b && ls"), Some("inspect"));
+    }
+
+    // Feature 0154.
+    fn secrets_of(tool: &str, input: Value) -> Option<&'static str> {
+        facts(json!({ "toolName": tool, "toolInput": input }), false).secrets_file
+    }
+
+    #[test]
+    fn flags_a_tool_use_that_touches_a_secrets_file() {
+        for (cmd, kind) in [
+            ("cp ../../app-backend/.env .env", "env"),
+            ("cat .env.local", "env"),
+            ("source .env", "env"),
+            ("docker run --env-file=.env.production app", "env"),
+            ("grep KEY \"apps/web/.env.development\"", "env"),
+            ("ssh -i ~/.ssh/id_ed25519 host", "key"),
+            ("cat server.pem", "key"),
+            ("openssl rsa -in certs/tls.key -check", "key"),
+            ("cat ~/.netrc", "key"),
+            ("scp -i id_rsa a.txt host:/tmp", "key"),
+            // env wins when both appear.
+            ("cat server.pem .env", "env"),
+        ] {
+            assert_eq!(secrets_of("Bash", json!({ "command": cmd })), Some(kind), "{cmd}");
+        }
+        assert_eq!(
+            secrets_of("Read", json!({ "file_path": "/repo/.env.production" })),
+            Some("env")
+        );
+        assert_eq!(
+            secrets_of("Edit", json!({ "file_path": "/repo/certs/server.key" })),
+            Some("key")
+        );
+        assert_eq!(secrets_of("Write", json!({ "file_path": "/repo/.env" })), Some("env"));
+    }
+
+    #[test]
+    fn templates_lookalikes_and_public_keys_are_not_secrets_files() {
+        for cmd in [
+            "cat .env.example",
+            "cat .env.sample .env.template .env.dist .env.defaults",
+            "ls src",
+            "echo environment",
+            "vim .envrc",
+            "cat ~/.ssh/id_ed25519.pub",
+            "cat config/env.ts",
+        ] {
+            assert_eq!(secrets_of("Bash", json!({ "command": cmd })), None, "{cmd}");
+        }
+        assert_eq!(secrets_of("Read", json!({ "file_path": "/repo/.env.example" })), None);
+        assert_eq!(secrets_of("Read", json!({ "file_path": "/repo/src/env.rs" })), None);
+        // A command field on a tool that is not a shell is not a command.
+        assert_eq!(secrets_of("Grep", json!({ "command": "cat .env" })), None);
+        // A subagent carries no secretsFile.
+        assert_eq!(secrets_of("Task", json!({ "file_path": "/repo/.env" })), None);
     }
 
     #[test]

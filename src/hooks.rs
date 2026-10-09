@@ -132,6 +132,7 @@ pub fn on_post_tool_use(ctx: &Ctx, payload: &Value, failure: bool) -> HookOutcom
         );
         event.tool_category = Some(facts.tool_category.to_string());
         event.command_category = facts.command_category.map(str::to_string);
+        event.secrets_file = facts.secrets_file.map(str::to_string);
         events.push(event);
 
         if live.turn_tool_activity.len() < MAX_TURN_TOOL_ACTIVITY {
