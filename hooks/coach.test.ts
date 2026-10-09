@@ -202,7 +202,10 @@ describe('/flueny-coach pane', () => {
       const ui = await $.ui.mount({ plugin: 'flueny', surface, component: 'Pane', requestId: 'flueny-coach', props: PANE_PROPS })
       const image = await ui.find({ type: 'Image' })
       if (surface === 'terminal') {
-        expect(image?.props).toMatchObject({ alt: 'Flueny', columns: 4, rows: 2 })
+        // Where the picture cannot be drawn its alt stands in: a space, so the
+        // row reads "Flueny coach" once.
+        expect(image?.props).toMatchObject({ alt: ' ', columns: 4, rows: 2 })
+        expect(await ui.find({ type: 'Text', text: /^Flueny$/ })).toBeFalsy()
         expect(await ui.find({ type: 'Text', text: /^Flueny coach$/ })).toBeTruthy()
       } else {
         expect(image).toBeFalsy()

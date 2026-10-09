@@ -277,8 +277,10 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
     // Feature 0154. The mark is pixels only on the terminal, the one surface
-    // whose table has an Image; anywhere else, and in a terminal that cannot
-    // draw pictures (Image's alt), it is the dim wordmark.
+    // whose table has an Image; anywhere else it is a dim "Flueny" wordmark.
+    // A terminal that cannot draw the picture draws its alt instead, so the
+    // alt is a single space (the least it may be): the row then reads just
+    // "Flueny coach", not the name twice.
     const Image = e.surface === 'terminal' ? $.ui.resolve(e).Image : undefined
     const s = complete(await read($, stats))
     const row = (label: string, value: string, isAlarm = false) => (
@@ -325,7 +327,7 @@ export const register: Register = (on, options) => {
           Nothing in this pane leaves this machine. /flueny:status shows what Flueny sends.
         </Text>
         <Box key="mark" gap={1} alignItems="center">
-          {Image ? <Image key="flueny-mark" source={{ png: FLUENY_MARK_PNG }} columns={4} rows={2} alt="Flueny" /> : null}
+          {Image ? <Image key="flueny-mark" source={{ png: FLUENY_MARK_PNG }} columns={4} rows={2} alt=" " /> : null}
           <Text dimColor>{Image ? 'Flueny coach' : 'Flueny'}</Text>
         </Box>
       </Box>
