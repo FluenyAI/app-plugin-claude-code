@@ -45,6 +45,9 @@ pub struct ToolFacts {
     // Feature 0108, widened by 0149. Only set when tool_category is bash: test,
     // git, build, install or other.
     pub command_category: Option<&'static str>,
+    // Feature 0154. Only on kind tool-use: env or key when the tool use touched
+    // a secrets file. The path and the command it was found in stay here.
+    pub secrets_file: Option<&'static str>,
     // Feature 0109. Present only under the raw-activity opt-in.
     pub raw_path: Option<String>,
     pub raw_command: Option<String>,
@@ -307,6 +310,44 @@ pub fn command_category(command: Option<&str>, is_test: bool) -> &'static str {
     }
 }
 
+// Feature 0154. Which secrets file a tool use touched, if any, decided here so
+// only the kind leaves the machine. Checked on the tool's file path and on every
+// word of a shell command (split on whitespace, shell operators, `=` and `:`,
+// quotes stripped, basename taken). `env` wins over `key` when both appear.
+const ENV_TEMPLATES: &[&str] = &["example", "sample", "template", "dist", "defaults"];
+const KEY_NAMES: &[&str] = &["id_rsa", "id_ecdsa", "id_ed25519", ".netrc"];
+
+fn secrets_kind_of(word: &str) -> Option<&'static str> {
+    let word = word.trim_matches(|c| c == '\'' || c == '"');
+    let name = word.rsplit(['/', '\\']).next().unwrap_or(word).to_lowercase();
+    if name == ".env" {
+        return Some("env");
+    }
+    if let Some(suffix) = name.strip_prefix(".env.") {
+        return (!suffix.is_empty() && !ENV_TEMPLATES.contains(&suffix)).then_some("env");
+    }
+    let is_key =
+        KEY_NAMES.contains(&name.as_str()) || (name.len() > 4 && (name.ends_with(".pem") || name.ends_with(".key")));
+    is_key.then_some("key")
+}
+
+pub fn secrets_file(path: Option<&str>, command: Option<&str>) -> Option<&'static str> {
+    let words = path.into_iter().chain(
+        command
+            .into_iter()
+            .flat_map(|c| c.split(|ch: char| ch.is_whitespace() || ";&|()<>`=:".contains(ch))),
+    );
+    let mut found = None;
+    for word in words {
+        match secrets_kind_of(word) {
+            Some("env") => return Some("env"),
+            Some(kind) => found = Some(kind),
+            None => {}
+        }
+    }
+    found
+}
+
 pub fn tool_name(payload: &Payload) -> String {
     first_string(payload, &["tool_name", "toolName"])
         .unwrap_or_default()
@@ -356,19 +397,24 @@ pub fn extract_tool_facts(
     let is_edit = EDIT_TOOLS.contains(&lower.as_str());
     let tool_category = classify_tool(&lower, is_edit);
     let is_test = command.is_some_and(is_test_command);
+    let kind = if SUBAGENT_TOOLS.contains(&lower.as_str()) {
+        "subagent"
+    } else {
+        "tool-use"
+    };
+    let shell_command = command.filter(|_| tool_category == "bash");
     ToolFacts {
         tool_use_id: first_string(payload, &["tool_use_id", "toolUseId"]).map(str::to_string),
-        kind: if SUBAGENT_TOOLS.contains(&lower.as_str()) {
-            "subagent"
-        } else {
-            "tool-use"
-        },
+        kind,
         is_edit,
         is_test_command: is_test,
         path_class,
         declined: looks_declined(tool_response(payload)),
         tool_category,
         command_category: (tool_category == "bash").then(|| command_category(command, is_test)),
+        secrets_file: (kind == "tool-use")
+            .then(|| secrets_file(file_path_in(input), shell_command))
+            .flatten(),
         raw_path: repo_relative
             .filter(|rel| include_raw && !rel.is_empty())
             .map(|rel| truncate(&rel, MAX_RAW_LENGTH)),
@@ -920,6 +966,61 @@ mod tests {
         assert_eq!(command_of("mkdir -p out && curl -o out/a https://x"), Some("network"));
         assert_eq!(command_of("cat a.txt | wc -l"), Some("inspect"));
         assert_eq!(command_of("cp a b && ls"), Some("inspect"));
+    }
+
+    // Feature 0154.
+    fn secrets_of(tool: &str, input: Value) -> Option<&'static str> {
+        facts(json!({ "toolName": tool, "toolInput": input }), false).secrets_file
+    }
+
+    #[test]
+    fn flags_a_tool_use_that_touches_a_secrets_file() {
+        for (cmd, kind) in [
+            ("cp ../../app-backend/.env .env", "env"),
+            ("cat .env.local", "env"),
+            ("source .env", "env"),
+            ("docker run --env-file=.env.production app", "env"),
+            ("grep KEY \"apps/web/.env.development\"", "env"),
+            ("ssh -i ~/.ssh/id_ed25519 host", "key"),
+            ("cat server.pem", "key"),
+            ("openssl rsa -in certs/tls.key -check", "key"),
+            ("cat ~/.netrc", "key"),
+            ("scp -i id_rsa a.txt host:/tmp", "key"),
+            // env wins when both appear.
+            ("cat server.pem .env", "env"),
+        ] {
+            assert_eq!(secrets_of("Bash", json!({ "command": cmd })), Some(kind), "{cmd}");
+        }
+        assert_eq!(
+            secrets_of("Read", json!({ "file_path": "/repo/.env.production" })),
+            Some("env")
+        );
+        assert_eq!(
+            secrets_of("Edit", json!({ "file_path": "/repo/certs/server.key" })),
+            Some("key")
+        );
+        assert_eq!(secrets_of("Write", json!({ "file_path": "/repo/.env" })), Some("env"));
+    }
+
+    #[test]
+    fn templates_lookalikes_and_public_keys_are_not_secrets_files() {
+        for cmd in [
+            "cat .env.example",
+            "cat .env.sample .env.template .env.dist .env.defaults",
+            "ls src",
+            "echo environment",
+            "vim .envrc",
+            "cat ~/.ssh/id_ed25519.pub",
+            "cat config/env.ts",
+        ] {
+            assert_eq!(secrets_of("Bash", json!({ "command": cmd })), None, "{cmd}");
+        }
+        assert_eq!(secrets_of("Read", json!({ "file_path": "/repo/.env.example" })), None);
+        assert_eq!(secrets_of("Read", json!({ "file_path": "/repo/src/env.rs" })), None);
+        // A command field on a tool that is not a shell is not a command.
+        assert_eq!(secrets_of("Grep", json!({ "command": "cat .env" })), None);
+        // A subagent carries no secretsFile.
+        assert_eq!(secrets_of("Task", json!({ "file_path": "/repo/.env" })), None);
     }
 
     #[test]
