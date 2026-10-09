@@ -5,7 +5,7 @@
 // The command text and file paths it is handed are matched and dropped: none of
 // it is stored, drawn or sent.
 
-import type { Nudge, NudgeKind, TeamGuidelines } from '../types'
+import type { Nudge, NudgeKind, SecretsTouch, TeamGuidelines } from '../types'
 
 // Mirrors TEST_COMMAND in src/extract.rs. Deliberately conservative for the
 // same reason: a false positive tells someone their edits were tested when
@@ -51,11 +51,14 @@ export type TurnFacts = {
   // Path classes the turn's edits touched, in the order first touched.
   touchedClasses?: readonly string[]
   guidelines?: TeamGuidelines | null
+  // Feature 0154. The first secrets file this session touched, if any.
+  secretsTouch?: SecretsTouch | null
 }
 
 export type NudgeMemory = {
   lastShownTurn: Partial<Record<NudgeKind, number>>
   isContextArmed: boolean
+  firstSecretsTouch?: SecretsTouch | null
 }
 
 const isQuiet = (memory: NudgeMemory, kind: NudgeKind, turn: number): boolean => {
@@ -64,10 +67,24 @@ const isQuiet = (memory: NudgeMemory, kind: NudgeKind, turn: number): boolean =>
   return last !== undefined && turn - last < QUIET_TURNS
 }
 
-// At most one line a turn. Untested edits come first: they are about the work
-// that was just done, where a full context is about the next task. A team
-// guideline (feature 0137) is the gentlest of the three, so it comes last.
+// At most one line a turn. A secrets file (feature 0154) comes first and shows
+// once a session: it is the one line about something that may already have
+// left the developer's control. Untested edits come next: they are about the
+// work that was just done, where a full context is about the next task. A team
+// guideline (feature 0137) is the gentlest, so it comes last.
 export const pickNudge = (facts: TurnFacts, memory: NudgeMemory): Nudge | null => {
+  const secrets = facts.secretsTouch
+  if (secrets && memory.lastShownTurn.secrets === undefined) {
+    const instead = secrets.kind === 'env' ? 'Point it at .env.example instead.' : 'Give it a throwaway key instead.'
+
+    return {
+      kind: 'secrets',
+      text:
+        `Flueny: Claude ${secrets.action} ${secrets.name} this session. Secrets in the agent's context can ` +
+        `end up in logs, commits or prompts. ${instead}`,
+    }
+  }
+
   if (facts.untestedFiles >= UNTESTED_FILES_MIN && !isQuiet(memory, 'untested', facts.turn)) {
     return {
       kind: 'untested',
@@ -132,6 +149,7 @@ export const remember = (memory: NudgeMemory, facts: TurnFacts, shown: Nudge | n
         : memory.isContextArmed
 
   return {
+    ...memory,
     lastShownTurn: shown ? { ...memory.lastShownTurn, [shown.kind]: facts.turn } : memory.lastShownTurn,
     isContextArmed,
   }

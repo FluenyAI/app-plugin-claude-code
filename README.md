@@ -158,7 +158,11 @@ runs in its own process, which can draw in the session. It does two things:
   count), or a context window 80% full. Turn it off with the plugin's **Coaching lines** setting in
   `/config`.
 - **`/flueny-coach`**, a pane of this session's own counts: turns, files edited, test runs, failed
-  commands, context fill and the lines shown.
+  commands, what kinds of shell command Claude ran (top three), secrets files touched (red above
+  0), context fill and the lines shown.
+- **Secrets files** (feature 0154): the first time a session touches a `.env` style file or a
+  private key, a one-time line under the answer names the file and what was done to it. It wins
+  over the other lines that turn.
 
 - **Team guidelines** (feature 0137), when the org has published them and the policy is on for you.
   The binary writes the digest from the handshake bundle to `guidelines.json` in its config
@@ -179,7 +183,9 @@ claude plugin test .
 ```
 
 `hooks/coach-rules.ts` holds the thresholds, and its test-command list mirrors `TEST_COMMAND` in
-`src/extract.rs`: change both together.
+`src/extract.rs`: change both together. `hooks/shell-kinds.ts` mirrors `command_category` and
+`secrets_file` the same way, and both test suites run the examples in
+`hooks/shell-kinds.fixture.ts`, so the two cannot drift.
 
 ## The privacy promise, and where it is held
 
@@ -274,6 +280,8 @@ workflow runs fmt, clippy and the tests on Linux, macOS and Windows.
 | `src/copy.rs` | the terminal strings and the voice rules |
 | `hooks/coach.tsx` | the in-session coach, a Claude Code mod |
 | `hooks/coach-rules.ts` | the coach's thresholds and test-command list |
+| `hooks/shell-kinds.ts` | the coach's copy of the shell kind and secrets file rules |
+| `hooks/shell-kinds.fixture.ts` | the examples the Rust and TypeScript rules are both tested against |
 | `hooks/guidelines.ts` | the guidelines file, the path classifier port, the context block |
 | `types/index.d.ts` | the coach's state contract |
 | `src/reads.rs` | what the client reads locally, declared |

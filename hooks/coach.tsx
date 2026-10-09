@@ -9,6 +9,9 @@
 //
 // - a coaching line under Claude's answer (turn.complete), at most one a turn
 // - /flueny-coach, a pane of this session's own counts
+// - feature 0154: what kinds of shell command Claude ran, how many tool uses
+//   touched a secrets file (.env, a private key), and a one-time line the
+//   first time one does, decided by the binary's own rules (shell-kinds.ts)
 // - feature 0137: the team's published guidelines as context for Claude, a
 //   guideline line when a turn touched code one covers, and /flueny-guidelines
 //
@@ -20,6 +23,7 @@ import type { Register } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 import type { NudgeState, SessionStats, TeamGuidelines } from '../types'
 import { EDIT_TOOLS, isTestCommand, needsTests, pickNudge, remember } from './coach-rules'
+import { commandKind, secretsActionOf, secretsFileOf, topShellKinds } from './shell-kinds'
 import {
   CONTEXT_BLOCK,
   GUIDELINES_FILE,
@@ -39,8 +43,18 @@ const EMPTY_STATS: SessionStats = {
   testRuns: 0,
   failedCommands: 0,
   contextPercent: null,
-  shown: { untested: 0, context: 0, guideline: 0 },
+  shown: { untested: 0, context: 0, guideline: 0, secrets: 0 },
+  secretsFilesTouched: 0,
+  shellKinds: {},
 }
+
+// Session state written by an older version of this mod lacks the newer
+// counts. A reload keeps the state, so fill the gaps rather than count on NaN.
+const complete = (s: SessionStats): SessionStats => ({
+  ...EMPTY_STATS,
+  ...s,
+  shown: { ...EMPTY_STATS.shown, ...s.shown },
+})
 
 const stats = atom({ plugin: 'flueny', key: 'stats' } as const, EMPTY_STATS)
 const nudges = atom({ plugin: 'flueny', key: 'nudges' } as const, {
@@ -85,6 +99,33 @@ const commandOf = (e: object): string | undefined => {
   const command = (e as { command?: unknown }).command
 
   return typeof command === 'string' ? command : undefined
+}
+
+// Feature 0154. Counts a shell command by kind and a tool use that touched a
+// secrets file. The command and path are matched here and dropped; only the
+// first secrets file's basename is kept, for the coach's own line.
+const noteShellAndSecrets = async ($: EngineInterface, e: { tool: string }) => {
+  const input = e as unknown as Record<string, unknown>
+  const command = e.tool === 'Bash' ? commandOf(e) : undefined
+  if (command !== undefined) {
+    const kind = commandKind(command)
+    await update($, stats, raw => {
+      const s = complete(raw)
+
+      return { ...s, shellKinds: { ...s.shellKinds, [kind]: (s.shellKinds[kind] ?? 0) + 1 } }
+    })
+  }
+  const hit = secretsFileOf(e.tool, input)
+  if (hit === null) {
+    return
+  }
+  await update($, stats, raw => {
+    const s = complete(raw)
+
+    return { ...s, secretsFilesTouched: s.secretsFilesTouched + 1 }
+  })
+  const action = secretsActionOf(e.tool, commandOf(e))
+  await update($, nudges, m => (m.firstSecretsTouch ? m : { ...m, firstSecretsTouch: { ...hit, action } }))
 }
 
 export const register: Register = (on, options) => {
@@ -149,6 +190,9 @@ export const register: Register = (on, options) => {
 
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
+    if (ran.deny === undefined) {
+      await noteShellAndSecrets($, e)
+    }
     if (ran.deny !== undefined || ran.isError === true) {
       if (e.tool === 'Bash' && ran.isError === true) {
         await update($, stats, s => ({ ...s, failedCommands: s.failedCommands + 1 }))
@@ -197,23 +241,28 @@ export const register: Register = (on, options) => {
       () => null,
     )
     const turn = (await read($, stats)).turns + 1
+    const memory = await read($, nudges)
     const facts = {
       turn,
       untestedFiles: untested.size,
       contextPercent,
       touchedClasses: touched,
       guidelines: await read($, guidelines),
+      secretsTouch: memory.firstSecretsTouch ?? null,
     }
 
-    const memory = await read($, nudges)
     const nudge = isNudging ? pickNudge(facts, memory) : null
     await update($, nudges, () => remember(memory, facts, nudge))
-    await update($, stats, s => ({
+    await update($, stats, raw => {
+      const s = complete(raw)
+
+      return {
       ...s,
       turns: turn,
       contextPercent,
       shown: nudge ? { ...s.shown, [nudge.kind]: s.shown[nudge.kind] + 1 } : s.shown,
-    }))
+      }
+    })
 
     if (nudge === null) {
       return done
@@ -226,15 +275,22 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
-    const s = await read($, stats)
-    const row = (label: string, value: string) => (
+    const s = complete(await read($, stats))
+    const row = (label: string, value: string, isAlarm = false) => (
       <Box key={label}>
-        <Box width={20}>
+        <Box width={24}>
           <Text dimColor>{label}</Text>
         </Box>
-        <Text>{value}</Text>
+        {isAlarm ? (
+          <Text color="error" bold>
+            {value}
+          </Text>
+        ) : (
+          <Text>{value}</Text>
+        )}
       </Box>
     )
+    const ran = topShellKinds(s.shellKinds)
 
     return (
       <Box flexDirection="column" gap={1}>
@@ -244,6 +300,8 @@ export const register: Register = (on, options) => {
           {row('Files edited', String(s.filesEdited))}
           {row('Test runs', String(s.testRuns))}
           {row('Failed commands', String(s.failedCommands))}
+          {row('What Claude ran', ran === '' ? 'no shell commands yet' : ran)}
+          {row('Secrets files touched', String(s.secretsFilesTouched), s.secretsFilesTouched > 0)}
           {row('Context', s.contextPercent === null ? 'not measured yet' : `${s.contextPercent}% full`)}
         </Box>
         <Box flexDirection="column">
@@ -251,6 +309,7 @@ export const register: Register = (on, options) => {
           {row('Untested changes', String(s.shown.untested))}
           {row('Context nearly full', String(s.shown.context))}
           {row('Team guideline', String(s.shown.guideline))}
+          {row('Secrets file', String(s.shown.secrets))}
           <Text dimColor>
             {isNudging
               ? 'Coaching lines are on. Turn them off in /config.'
