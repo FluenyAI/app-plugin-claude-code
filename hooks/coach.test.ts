@@ -197,6 +197,19 @@ describe('/flueny-coach pane', () => {
       expect(await ui.find({ type: 'Text', text: 'Running tests 1 \u00b7 Shell command 1' })).toBeTruthy()
     })
 
+    test(`carries the Flueny mark in its corner on ${surface}`, async ($, on) => {
+      engine(on)
+      const ui = await $.ui.mount({ plugin: 'flueny', surface, component: 'Pane', requestId: 'flueny-coach', props: PANE_PROPS })
+      const image = await ui.find({ type: 'Image' })
+      if (surface === 'terminal') {
+        expect(image?.props).toMatchObject({ alt: 'Flueny', columns: 4, rows: 2 })
+        expect(await ui.find({ type: 'Text', text: /^Flueny coach$/ })).toBeTruthy()
+      } else {
+        expect(image).toBeFalsy()
+        expect(await ui.find({ type: 'Text', text: /^Flueny$/ })).toBeTruthy()
+      }
+    })
+
     test(`shows shell kinds and secrets files in red on ${surface}`, async ($, on) => {
       engine(on)
       await turn($, async () => {

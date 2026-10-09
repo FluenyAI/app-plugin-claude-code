@@ -23,6 +23,7 @@ import type { Register } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 import type { NudgeState, SessionStats, TeamGuidelines } from '../types'
 import { EDIT_TOOLS, isTestCommand, needsTests, pickNudge, remember } from './coach-rules'
+import { FLUENY_MARK_PNG } from './logo'
 import { commandKind, secretsActionOf, secretsFileOf, topShellKinds } from './shell-kinds'
 import {
   CONTEXT_BLOCK,
@@ -275,6 +276,10 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
+    // Feature 0154. The mark is pixels only on the terminal, the one surface
+    // whose table has an Image; anywhere else, and in a terminal that cannot
+    // draw pictures (Image's alt), it is the dim wordmark.
+    const Image = e.surface === 'terminal' ? $.ui.resolve(e).Image : undefined
     const s = complete(await read($, stats))
     const row = (label: string, value: string, isAlarm = false) => (
       <Box key={label}>
@@ -319,6 +324,10 @@ export const register: Register = (on, options) => {
         <Text dimColor>
           Nothing in this pane leaves this machine. /flueny:status shows what Flueny sends.
         </Text>
+        <Box key="mark" gap={1} alignItems="center">
+          {Image ? <Image key="flueny-mark" source={{ png: FLUENY_MARK_PNG }} columns={4} rows={2} alt="Flueny" /> : null}
+          <Text dimColor>{Image ? 'Flueny coach' : 'Flueny'}</Text>
+        </Box>
       </Box>
     )
   })
