@@ -183,3 +183,61 @@ describe('team guidelines in the session', () => {
     })
   }
 })
+
+// Feature 0156: the SessionStart hook notes a sign-in left in the Keychain, and
+// the coach says so once, at the first prompt.
+describe('a sign-in waiting in the Keychain', () => {
+  const engineWith = (on: On, files: Record<string, string>) => {
+    on('env.get', (_$, e) => ({ value: (e as { name?: string }).name === 'HOME' ? '/home/dev' : undefined }))
+    on('fs.read', (_$, e) => {
+      const file = files[String((e as { path?: unknown }).path)]
+
+      return file === undefined ? { deny: 'ENOENT' } : { value: file }
+    })
+    on('prompt.context', (_$, e) => ({ blocks: e.blocks }))
+  }
+  const NOTE = '/home/dev/.config/flueny/keychain-sign-in.claude-code.json'
+
+  test('shows the toast once a session', async ($, on) => {
+    const toasts: string[] = []
+    engineWith(on, { [NOTE]: '{"enabled":true}' })
+    on('ui.toast', (_$, e) => {
+      toasts.push((e as { text: string }).text)
+
+      return { value: undefined }
+    })
+    await $.prompt.context({ blocks: [] })
+    await $.prompt.context({ blocks: [] })
+    expect(toasts.length).toBe(1)
+    expect(toasts[0]).toContain('Run /flueny:status once and choose Allow.')
+  })
+
+  test('a note written after the context is built still shows at the first turn', async ($, on) => {
+    const toasts: string[] = []
+    const files: Record<string, string> = {}
+    engineWith(on, files)
+    on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+    on('ui.toast', (_$, e) => {
+      toasts.push((e as { text: string }).text)
+
+      return { value: undefined }
+    })
+    await $.prompt.context({ blocks: [] })
+    files[NOTE] = '{"enabled":true}'
+    await $.turn.start({ text: 'fix it', turnId: 't1' })
+    await $.turn.start({ text: 'again', turnId: 't2' })
+    expect(toasts.length).toBe(1)
+  })
+
+  test('no note, no toast', async ($, on) => {
+    const toasts: string[] = []
+    engineWith(on, {})
+    on('ui.toast', (_$, e) => {
+      toasts.push((e as { text: string }).text)
+
+      return { value: undefined }
+    })
+    await $.prompt.context({ blocks: [] })
+    expect(toasts.length).toBe(0)
+  })
+})

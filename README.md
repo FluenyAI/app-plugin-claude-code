@@ -56,16 +56,17 @@ rather than the address in a browser: a custom SSH host alias derives a differen
 
 ### Where the sign-in lives
 
-The hook token is stored in the operating system's credential store: the macOS Keychain, the
-Windows Credential Manager, or the Secret Service on Linux. Only on a machine with no store at all
-(a headless box, a container, a CI runner) does it fall back to a file readable only by you
-(mode 0600) under `~/.config/flueny`, and `flueny status` says which one is in use on its
-`Credential store` line. A credential left by an earlier version of this client in a 0600 file is
-moved into the store the first time it is read, and the file is deleted.
+On macOS the sign-in is a file readable only by you (mode 0600) in `~/.config/flueny`, the way
+`gh`, `aws` and `gcloud` keep theirs, so the Keychain never prompts. On Windows it is the Credential
+Manager, on Linux the Secret Service, and a machine with no store at all (a headless box, a
+container, a CI runner) uses the same 0600 file. `flueny status` names the one in use on its
+`Credential store` line. `FLUENY_CREDENTIAL_STORE=keychain` keeps the macOS Keychain for anyone who
+prefers it, prompts included.
 
-On macOS the Keychain may ask once whether `flueny` can use the Flueny entry after the plugin is
-updated, because each build is a new binary. Choose Always Allow. A hook never waits on that
-prompt for more than a moment; it skips sending for that one call instead.
+A sign-in an earlier version left in the macOS Keychain moves into the file the next time you run
+`/flueny:status` (or `/flueny:connect`). macOS asks once to allow it; choose Allow. Hooks never read
+the Keychain, so until then the session sends nothing, and the coach shows a reminder at your first
+prompt.
 
 ### Without the plugin
 
@@ -232,8 +233,6 @@ on an Apple silicon Mac against a local API, median per hook through `flueny-hoo
 | `PostToolUse` Edit with weakened-test scan | 16.5 ms | |
 | `PostToolUse` test run with summary parsing | 16.3 ms | |
 | `Stop` | 8.6 ms | |
-
-Reading the token from the macOS Keychain adds about 10 ms to a hook that sends.
 
 Hooks fail open: they never print to stdout, never exit non-zero, and stop themselves after 8
 seconds, well inside the host's own timeout.

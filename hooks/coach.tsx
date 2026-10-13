@@ -2,8 +2,9 @@
 //
 // The command hooks in hooks.json are the sensor and the only thing that sends
 // anything. This module sends nothing: it makes no network or process call, and
-// its one file call reads guidelines.json, which the binary wrote. `claude
-// plugin validate` shows a reviewer exactly that. It reads tool names, edited
+// its file calls read guidelines.json and keychain-sign-in.claude-code.json,
+// which the binary wrote. `claude plugin validate` shows a reviewer exactly
+// that. It reads tool names, edited
 // file paths and Bash command text as they pass, reduces them to counts and
 // path classes in memory, and draws from those:
 //
@@ -14,6 +15,8 @@
 //   first time one does, decided by the binary's own rules (shell-kinds.ts)
 // - feature 0137: the team's published guidelines as context for Claude, a
 //   guideline line when a turn touched code one covers, and /flueny-guidelines
+// - feature 0156: a toast, once a session, when the binary's SessionStart hook
+//   found the sign-in still waiting in the Keychain (keychain-sign-in.claude-code.json)
 //
 // Claude Code only. Grok has no mods and keeps the command hooks alone.
 
@@ -64,10 +67,9 @@ const nudges = atom({ plugin: 'flueny', key: 'nudges' } as const, {
 } satisfies NudgeState)
 const guidelines = atom({ plugin: 'flueny', key: 'guidelines' } as const, null as TeamGuidelines | null)
 
-// Reads what the binary's last handshake left. A missing or malformed file is
-// no guidelines: the policy is off, nothing is published, or Flueny is not
-// connected on this machine.
-const loadGuidelines = async ($: EngineInterface): Promise<TeamGuidelines | null> => {
+// One of the binary's files in its config directory, or null when it is not
+// there.
+const readConfigFile = async ($: EngineInterface, name: string): Promise<string | null> => {
   // Each name spelled out, so `claude plugin validate` lists what is read.
   const env: Record<string, string | undefined> = {
     FLUENY_CONFIG_DIR: await $.env.get('FLUENY_CONFIG_DIR'),
@@ -75,16 +77,56 @@ const loadGuidelines = async ($: EngineInterface): Promise<TeamGuidelines | null
     HOME: await $.env.get('HOME'),
     USERPROFILE: await $.env.get('USERPROFILE'),
   }
-  const dir = configDir(name => env[name])
+  const dir = configDir(key => env[key])
   if (dir === null) {
     return null
   }
-  const text = await $.fs.read(`${dir}/${GUIDELINES_FILE}`).then(
+
+  return $.fs.read(`${dir}/${name}`).then(
     t => (typeof t === 'string' ? t : null),
     () => null,
   )
+}
+
+// Reads what the binary's last handshake left. A missing or malformed file is
+// no guidelines: the policy is off, nothing is published, or Flueny is not
+// connected on this machine.
+const loadGuidelines = async ($: EngineInterface): Promise<TeamGuidelines | null> => {
+  const text = await readConfigFile($, GUIDELINES_FILE)
 
   return text === null ? null : parseGuidelines(text)
+}
+
+// Feature 0156. The binary's hooks never read the Keychain, so a sign-in an
+// earlier version left there waits for one command a person runs. The
+// SessionStart hook notes that here without a prompt.
+const KEYCHAIN_FILE = 'keychain-sign-in.claude-code.json'
+// Four lines of the toast box at most, or the instruction is cut.
+const KEYCHAIN_NOTICE =
+  'Flueny is paused: your sign-in is still in the macOS Keychain. Run /flueny:status once and choose Allow.'
+
+const isSignInInKeychain = async ($: EngineInterface): Promise<boolean> => {
+  const text = await readConfigFile($, KEYCHAIN_FILE)
+  if (text === null) {
+    return false
+  }
+  try {
+    return (JSON.parse(text) as { enabled?: unknown }).enabled === true
+  } catch {
+    return false
+  }
+}
+
+// Shows the toast when the note is there. True once nothing is left to check:
+// the toast was shown, or this was the last chance.
+const remindOfKeychain = async ($: EngineInterface, isLastChance: boolean): Promise<boolean> => {
+  if (await isSignInInKeychain($)) {
+    $.ui.toast(KEYCHAIN_NOTICE, { timeoutMs: 15_000 })
+
+    return true
+  }
+
+  return isLastChance
 }
 
 // The one place a path or command is looked at. Returns the edited file path
@@ -137,6 +179,10 @@ export const register: Register = (on, options) => {
   let untested = new Set<string>()
   // Every file edited this session, counted for the pane.
   const edited = new Set<string>()
+  // The Keychain toast, at most once a session. Asked when the session's
+  // context is built and again when its first turn starts, because the
+  // binary's SessionStart hook may not have written the note yet the first time.
+  let isKeychainChecked = false
   // Path classes this turn's edits touched, first touch first. Only the class
   // label is kept; the path is matched and dropped.
   let touched: string[] = []
@@ -173,6 +219,9 @@ export const register: Register = (on, options) => {
   // just refreshed the file.
   on('prompt.context', async ($, e, next) => {
     const done = await next(e)
+    if (!isKeychainChecked) {
+      isKeychainChecked = await remindOfKeychain($, false)
+    }
     const current = await loadGuidelines($)
     await update($, guidelines, () => current)
     if (current === null || done.blocks.some(b => b.name === CONTEXT_BLOCK)) {
@@ -182,9 +231,12 @@ export const register: Register = (on, options) => {
     return { ...done, blocks: [...done.blocks, { name: CONTEXT_BLOCK, text: contextText(current) }] }
   })
 
-  on('turn.start', ($, e, next) => {
+  on('turn.start', async ($, e, next) => {
     untested = new Set()
     touched = []
+    if (!isKeychainChecked) {
+      isKeychainChecked = await remindOfKeychain($, true)
+    }
 
     return next(e)
   })

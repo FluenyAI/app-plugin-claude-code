@@ -17,7 +17,7 @@ use crate::api::{
 use crate::api_url::{API_TARGETS, describe_api, resolve_api_target};
 use crate::context::Ctx;
 use crate::copy::{setup_connected, weekly_summary, wrap80};
-use crate::credentials::{Credentials, Location};
+use crate::credentials::{Caller, Credentials, Location};
 use crate::hooks::{on_post_tool_use, on_session_end, on_session_start, on_stop};
 use crate::receipt::receipt_for;
 use crate::session::handshake_request;
@@ -32,7 +32,7 @@ pub fn main(args: Vec<String>) -> i32 {
     if command == "hook" {
         return hook(rest);
     }
-    let ctx = Ctx::from_env(flag(rest, "--agent").as_deref());
+    let ctx = Ctx::from_env(flag(rest, "--agent").as_deref(), caller_for(command));
     match command {
         "login" => login(&ctx, rest),
         "logout" => logout(&ctx),
@@ -45,6 +45,19 @@ pub fn main(args: Vec<String>) -> i32 {
             0
         }
         _ => usage(),
+    }
+}
+
+/// Feature 0156: the commands a person runs, the only ones that may wait on a
+/// Keychain prompt. Anything else, including a command the coach mod spawns,
+/// runs unattended and is treated as a hook.
+pub const PERSON_COMMANDS: &[&str] = &["login", "logout", "status", "dry-run", "api"];
+
+fn caller_for(command: &str) -> Caller {
+    if PERSON_COMMANDS.contains(&command) {
+        Caller::Person
+    } else {
+        Caller::Hook
     }
 }
 
@@ -80,7 +93,7 @@ fn hook(argv: &[String]) -> i32 {
     let event = argv.first().cloned().unwrap_or_default();
     let _ = std::panic::catch_unwind(move || {
         let payload = read_stdin_json();
-        let ctx = Ctx::from_env(None);
+        let ctx = Ctx::from_env(None, Caller::Hook);
         run_hook(&ctx, &event, &payload);
     });
     0
@@ -89,6 +102,7 @@ fn hook(argv: &[String]) -> i32 {
 pub fn run_hook(ctx: &Ctx, event: &str, payload: &Value) {
     match event {
         "session-start" => {
+            ctx.creds.note_left_behind(ctx.agent);
             on_session_start(ctx, payload);
         }
         "post-tool-use" => {
@@ -352,6 +366,15 @@ fn status(ctx: &Ctx) -> i32 {
     let others: Vec<AgentId> = ctx.creds.list_agents().into_iter().filter(|a| *a != agent).collect();
     ctx.creds.read(agent); // migrates a legacy file before it is located
     let Some((creds, location)) = ctx.creds.read_located(agent) else {
+        if ctx.creds.left_in_keychain(agent) {
+            say(&wrap80(
+                "Your Flueny sign-in is still in the macOS Keychain, so nothing is sent. \
+                 Run flueny status again and choose Allow when macOS asks: that moves it \
+                 into a 0600 file, and the Keychain is not asked again. Or sign in again \
+                 with flueny login.",
+            ));
+            return 0;
+        }
         if others.is_empty() {
             say("Flueny is not connected on this machine. Run flueny login.");
         } else {
@@ -364,6 +387,11 @@ fn status(ctx: &Ctx) -> i32 {
         }
         return 0;
     };
+    if ctx.creds.moved_from_keychain() {
+        say("Moved your sign-in out of the Keychain into a 0600 file. The Keychain is not");
+        say("asked again.");
+        say("");
+    }
     let store = &ctx.store;
     let bundle = store.read_bundle();
     let counters = store.read_counters(&today());
@@ -601,6 +629,17 @@ fn say(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Feature 0156: only a command a person types may wait on a Keychain prompt.
+    #[test]
+    fn only_person_commands_may_prompt_for_the_keychain() {
+        for command in ["login", "logout", "status", "dry-run", "api"] {
+            assert_eq!(caller_for(command), Caller::Person, "{command}");
+        }
+        for command in ["hook", "install", "live", "review-prompt", "prompt-coach", ""] {
+            assert_eq!(caller_for(command), Caller::Hook, "{command}");
+        }
+    }
 
     #[test]
     fn origin_and_days_until() {
