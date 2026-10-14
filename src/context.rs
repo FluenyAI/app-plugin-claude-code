@@ -2,7 +2,7 @@
 // lives, and which host this process is running under. Passed explicitly rather
 // than read from globals, so tests run in parallel against their own temp dirs.
 
-use crate::credentials::CredentialStore;
+use crate::credentials::{Caller, CredentialStore};
 use crate::store::Store;
 use crate::types::AgentId;
 
@@ -14,10 +14,10 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    pub fn from_env(agent_override: Option<&str>) -> Ctx {
+    pub fn from_env(agent_override: Option<&str>, caller: Caller) -> Ctx {
         let store = Store::from_env();
         Ctx {
-            creds: CredentialStore::from_env(store.clone()),
+            creds: CredentialStore::from_env(store.clone(), caller),
             store,
             agent: detect_agent(agent_override),
         }

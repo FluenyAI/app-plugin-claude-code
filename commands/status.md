@@ -17,9 +17,17 @@ silent.
    sh "${GROK_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/flueny.sh" status
    ```
 
+   On macOS this can show a Keychain dialog once, the last one Flueny ever
+   raises. Tell the user to choose Allow; the command waits up to 2 minutes.
+
 2. Read the result against these links, in order, and report the FIRST broken
    one rather than a summary:
 
+   - **Sign-in still in the Keychain.** macOS asks once to allow access while
+     `status` moves an earlier version's sign-in into a file. If the output says
+     it is still in the Keychain, the dialog was denied or timed out: ask the
+     user to run `/flueny:status` again and choose Allow (or "Always Allow").
+     Hooks never ask for the Keychain, so nothing is sent until this is done.
    - **No credential.** The machine has never signed in. Run `/flueny:connect`.
    - **Handshake failing.** Sign-in exists but the server rejected the session.
      Report the status code verbatim; this is a Flueny problem, not the user's.

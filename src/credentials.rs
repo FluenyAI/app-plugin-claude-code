@@ -17,7 +17,11 @@
 //
 // Migration to the macOS file: a credential an earlier version left in the
 // Keychain is read once (the last prompt), written to the file, and deleted from
-// the Keychain, so nobody has to sign in again.
+// the Keychain, so nobody has to sign in again. Only a command a person runs
+// does that (feature 0156). A hook gave up on the Keychain after the store
+// timeout, before anyone could answer the dialog, so the move never completed
+// and every session asked again. A hook now reads the file alone, and notes a
+// waiting move with an attributes-only lookup that never prompts.
 //
 // One entry per agent. Claude Code and Grok share a machine and a repository, and
 // ingest attributes a batch to the hook token's agent, so a single credential made
@@ -39,6 +43,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -49,6 +54,12 @@ use crate::store::{Store, read_json, write_json};
 use crate::types::{AgentId, KNOWN_AGENTS};
 
 const SERVICE: &str = "flueny";
+
+/// The flag a hook leaves, `keychain-sign-in.<agent>.json`, when that agent's
+/// credential waits in the Keychain (feature 0156).
+pub fn left_behind_flag(agent: AgentId) -> String {
+    format!("keychain-sign-in.{}", agent.as_str())
+}
 
 /// The store's service name. `FLUENY_CREDENTIAL_SERVICE` exists for development
 /// and measurement, so a scratch run never reads or overwrites the real entry.
@@ -65,6 +76,27 @@ fn service() -> String {
 // a call that times out reads as "no credential this time", never as "no store",
 // so it cannot quietly downgrade the token to the file.
 const STORE_TIMEOUT: Duration = Duration::from_millis(2500);
+
+// A person at a terminal can answer the Keychain dialog, given the time to read it.
+const INTERACTIVE_STORE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Who is reading the credential. A hook, or a command the mod spawns, runs
+/// unattended, so on macOS it never reads the Keychain. A person running a
+/// command can answer a Keychain prompt, so only they move a credential out of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Caller {
+    Hook,
+    Person,
+}
+
+impl Caller {
+    fn timeout(self) -> Duration {
+        match self {
+            Caller::Hook => STORE_TIMEOUT,
+            Caller::Person => INTERACTIVE_STORE_TIMEOUT,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,20 +135,34 @@ pub trait SecretBackend: Send + Sync {
     fn get(&self, account: &str) -> Result<Option<String>, StoreError>;
     fn set(&self, account: &str, secret: &str) -> Result<(), StoreError>;
     fn delete(&self, account: &str) -> Result<(), StoreError>;
+    /// Whether the store holds an entry, asked without any prompt. False when
+    /// the store cannot say that without one.
+    fn has_entry_quietly(&self, _account: &str) -> bool {
+        false
+    }
 }
 
 /// The platform store through the `keyring` crate.
-pub struct OsKeyring;
+pub struct OsKeyring {
+    timeout: Duration,
+}
 
 impl OsKeyring {
+    pub fn for_caller(caller: Caller) -> OsKeyring {
+        OsKeyring {
+            timeout: caller.timeout(),
+        }
+    }
+
     fn bounded<T: Send + 'static>(
+        &self,
         op: impl FnOnce() -> Result<T, StoreError> + Send + 'static,
     ) -> Result<T, StoreError> {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(op());
         });
-        rx.recv_timeout(STORE_TIMEOUT).unwrap_or(Err(StoreError::Timeout))
+        rx.recv_timeout(self.timeout).unwrap_or(Err(StoreError::Timeout))
     }
 
     fn entry(account: &str) -> Result<keyring::Entry, StoreError> {
@@ -137,7 +183,7 @@ impl SecretBackend for OsKeyring {
 
     fn get(&self, account: &str) -> Result<Option<String>, StoreError> {
         let account = account.to_string();
-        Self::bounded(move || match Self::entry(&account)?.get_password() {
+        self.bounded(move || match Self::entry(&account)?.get_password() {
             Ok(secret) => Ok(Some(secret)),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(_) => Err(StoreError::Unavailable),
@@ -147,7 +193,7 @@ impl SecretBackend for OsKeyring {
     fn set(&self, account: &str, secret: &str) -> Result<(), StoreError> {
         let account = account.to_string();
         let secret = secret.to_string();
-        Self::bounded(move || {
+        self.bounded(move || {
             Self::entry(&account)?
                 .set_password(&secret)
                 .map_err(|_| StoreError::Unavailable)
@@ -156,10 +202,41 @@ impl SecretBackend for OsKeyring {
 
     fn delete(&self, account: &str) -> Result<(), StoreError> {
         let account = account.to_string();
-        Self::bounded(move || match Self::entry(&account)?.delete_credential() {
+        self.bounded(move || match Self::entry(&account)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(_) => Err(StoreError::Unavailable),
         })
+    }
+
+    // `security find-generic-password` without `-w` or `-g` reads the item's
+    // attributes, which needs no access to the secret and so never prompts.
+    // Exit 0 means the item exists. Bounded like every other store call.
+    #[cfg(target_os = "macos")]
+    fn has_entry_quietly(&self, account: &str) -> bool {
+        use std::process::{Command, Stdio};
+        let Ok(mut child) = Command::new("/usr/bin/security")
+            .args(["find-generic-password", "-s", &service(), "-a", account])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return false;
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return status.success(),
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+            }
+        }
     }
 }
 
@@ -208,6 +285,10 @@ impl SecretBackend for MemoryBackend {
             .remove(account);
         Ok(())
     }
+
+    fn has_entry_quietly(&self, account: &str) -> bool {
+        !self.unavailable && self.entries.lock().is_ok_and(|e| e.contains_key(account))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,8 +311,12 @@ pub struct CredentialStore {
     store: Store,
     backend: Option<Arc<dyn SecretBackend>>,
     // File mode only: an OS store an earlier version kept the credential in. Read
-    // once to move it into the file, never written.
+    // once to move it into the file, never written. Set only for a person.
     migrate_from: Option<Arc<dyn SecretBackend>>,
+    // File mode, hooks: the same store, only ever asked whether it still holds
+    // a credential, which never prompts.
+    left_behind_in: Option<Arc<dyn SecretBackend>>,
+    moved: Arc<AtomicBool>,
     file_reason: FileReason,
     // A store read can cost milliseconds (a Keychain lookup is the slowest thing
     // a hook does locally), and one hook can need the token more than once. The
@@ -245,6 +330,8 @@ impl CredentialStore {
             store,
             backend,
             migrate_from: None,
+            left_behind_in: None,
+            moved: Arc::default(),
             file_reason: FileReason::Forced,
             cache: Arc::default(),
         }
@@ -260,15 +347,29 @@ impl CredentialStore {
         }
     }
 
+    /// The file as the store for a hook: never reads `previous`, only notes
+    /// that it still holds a credential. The macOS default for hooks.
+    pub fn file_noting(store: Store, previous: Arc<dyn SecretBackend>) -> CredentialStore {
+        CredentialStore {
+            left_behind_in: Some(previous),
+            file_reason: FileReason::Default,
+            ..CredentialStore::new(store, None)
+        }
+    }
+
     /// `FLUENY_CREDENTIAL_STORE`: `file` forces the file, `keychain` (or `system`)
     /// forces the OS store. Unset: the file on macOS, the OS store elsewhere.
-    pub fn from_env(store: Store) -> CredentialStore {
+    pub fn from_env(store: Store, caller: Caller) -> CredentialStore {
         let choice = std::env::var("FLUENY_CREDENTIAL_STORE").unwrap_or_default();
+        let os = Arc::new(OsKeyring::for_caller(caller));
         match choice.to_ascii_lowercase().as_str() {
             "file" => CredentialStore::new(store, None),
-            "keychain" | "system" => CredentialStore::new(store, Some(Arc::new(OsKeyring))),
-            _ if cfg!(target_os = "macos") => CredentialStore::file_migrating_from(store, Arc::new(OsKeyring)),
-            _ => CredentialStore::new(store, Some(Arc::new(OsKeyring))),
+            "keychain" | "system" => CredentialStore::new(store, Some(os)),
+            _ if cfg!(target_os = "macos") => match caller {
+                Caller::Person => CredentialStore::file_migrating_from(store, os),
+                Caller::Hook => CredentialStore::file_noting(store, os),
+            },
+            _ => CredentialStore::new(store, Some(os)),
         }
     }
 
@@ -294,6 +395,41 @@ impl CredentialStore {
 
     fn token_path(&self, agent: AgentId) -> PathBuf {
         self.store.path(&format!("token.{}.json", agent.as_str()))
+    }
+
+    /// For a hook at session start: notes, in `keychain-sign-in.json`, that an
+    /// earlier version's credential is still in the Keychain and no file has
+    /// taken it yet, so the coach can ask for the one command that moves it.
+    /// Never prompts. Returns whether a move is waiting.
+    pub fn note_left_behind(&self, agent: AgentId) -> bool {
+        if self.left_behind_in.is_none() {
+            return false;
+        }
+        let waiting = self.left_in_keychain(agent);
+        if waiting {
+            self.store.write_flag(&left_behind_flag(agent), true);
+        } else {
+            self.forget_left_behind(agent);
+        }
+        waiting
+    }
+
+    /// No credential file, and the Keychain still holds this agent's credential
+    /// from an earlier version. Asked without a prompt.
+    pub fn left_in_keychain(&self, agent: AgentId) -> bool {
+        let Some(previous) = self.left_behind_in.as_ref().or(self.migrate_from.as_ref()) else {
+            return false;
+        };
+        !self.file_path(agent).exists() && previous.has_entry_quietly(agent.as_str())
+    }
+
+    /// Whether this process moved a credential out of the Keychain, for `flueny status`.
+    pub fn moved_from_keychain(&self) -> bool {
+        self.moved.load(Ordering::Relaxed)
+    }
+
+    fn forget_left_behind(&self, agent: AgentId) {
+        let _ = fs::remove_file(self.store.path(&format!("{}.json", left_behind_flag(agent))));
     }
 
     /// The cached hook token, with an empty refresh token. Only kept while the
@@ -383,6 +519,7 @@ impl CredentialStore {
             ..creds.clone()
         };
         let file = self.file_path(agent);
+        self.forget_left_behind(agent);
         if let Some(backend) = &self.backend
             && let Ok(secret) = serde_json::to_string(&stored)
             && backend.set(agent.as_str(), &secret).is_ok()
@@ -414,6 +551,8 @@ impl CredentialStore {
         // Only drop the store's copy once the file really holds it.
         if read_json::<Credentials>(&file).as_ref() == Some(&stored) {
             let _ = previous.delete(agent.as_str());
+            self.forget_left_behind(agent);
+            self.moved.store(true, Ordering::Relaxed);
         }
         let _ = fs::remove_file(self.token_path(agent));
         Some((stored, Location::File(file)))
@@ -433,6 +572,7 @@ impl CredentialStore {
         }
         let _ = fs::remove_file(self.file_path(agent));
         let _ = fs::remove_file(self.token_path(agent));
+        self.forget_left_behind(agent);
     }
 
     pub fn list_agents(&self) -> Vec<AgentId> {
@@ -716,6 +856,100 @@ mod tests {
         let store = CredentialStore::file_migrating_from(Store::new(dir.path().join("config")), Arc::new(TimesOut));
         assert_eq!(store.read(AgentId::ClaudeCode), None);
         assert!(!store.file_path(AgentId::ClaudeCode).exists());
+    }
+
+    // Feature 0156: a hook only ever asks whether the Keychain holds a
+    // credential, never reads it, so it can never raise the dialog.
+    #[derive(Default, Clone)]
+    struct NeverRead {
+        holds: bool,
+        reads: Arc<Mutex<u32>>,
+    }
+
+    impl SecretBackend for NeverRead {
+        fn name(&self) -> &'static str {
+            "keychain that prompts"
+        }
+        fn get(&self, _: &str) -> Result<Option<String>, StoreError> {
+            *self.reads.lock().unwrap() += 1;
+            Err(StoreError::Timeout)
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), StoreError> {
+            *self.reads.lock().unwrap() += 1;
+            Err(StoreError::Timeout)
+        }
+        fn delete(&self, _: &str) -> Result<(), StoreError> {
+            *self.reads.lock().unwrap() += 1;
+            Err(StoreError::Timeout)
+        }
+        fn has_entry_quietly(&self, _: &str) -> bool {
+            self.holds
+        }
+    }
+
+    fn flag_path(store: &CredentialStore, agent: AgentId) -> PathBuf {
+        store.store.path(&format!("{}.json", left_behind_flag(agent)))
+    }
+
+    #[test]
+    fn a_hook_never_reads_the_keychain_and_notes_a_waiting_move() {
+        let keychain = NeverRead {
+            holds: true,
+            ..Default::default()
+        };
+        let dir = TempDir::new();
+        let store = CredentialStore::file_noting(Store::new(dir.path().join("config")), Arc::new(keychain.clone()));
+
+        assert_eq!(store.read(AgentId::ClaudeCode), None);
+        assert!(store.list_agents().is_empty());
+        assert!(store.note_left_behind(AgentId::ClaudeCode));
+        assert_eq!(
+            *keychain.reads.lock().unwrap(),
+            0,
+            "a hook must not touch the Keychain item"
+        );
+        assert!(store.store.read_flag(&left_behind_flag(AgentId::ClaudeCode)));
+        assert!(!flag_path(&store, AgentId::GrokBuild).exists());
+
+        // A sign-in writes the file, which clears the note.
+        store.write(&creds("fresh"), AgentId::ClaudeCode);
+        assert!(!flag_path(&store, AgentId::ClaudeCode).exists());
+        assert!(!store.note_left_behind(AgentId::ClaudeCode));
+        assert_eq!(store.read(AgentId::ClaudeCode).unwrap().access_token, "fresh");
+        assert_eq!(*keychain.reads.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn nothing_in_the_keychain_leaves_no_note() {
+        let dir = TempDir::new();
+        let store = CredentialStore::file_noting(Store::new(dir.path().join("config")), Arc::new(NeverRead::default()));
+        assert!(!store.note_left_behind(AgentId::ClaudeCode));
+        assert!(!flag_path(&store, AgentId::ClaudeCode).exists());
+    }
+
+    #[test]
+    fn a_person_moves_the_credential_and_clears_the_note() {
+        let memory = MemoryBackend::default();
+        let stored = serde_json::to_string(&creds("from-keychain")).unwrap();
+        memory.entries.lock().unwrap().insert("claude-code".into(), stored);
+        let dir = TempDir::new();
+        let config = Store::new(dir.path().join("config"));
+
+        let hook = CredentialStore::file_noting(config.clone(), Arc::new(memory.clone()));
+        assert!(hook.note_left_behind(AgentId::ClaudeCode));
+        assert_eq!(hook.read(AgentId::ClaudeCode), None);
+
+        let person = CredentialStore::file_migrating_from(config.clone(), Arc::new(memory.clone()));
+        assert!(person.left_in_keychain(AgentId::ClaudeCode));
+        assert_eq!(person.read(AgentId::ClaudeCode).unwrap().access_token, "from-keychain");
+        assert!(person.moved_from_keychain());
+        assert!(!person.left_in_keychain(AgentId::ClaudeCode));
+        assert!(memory.entries.lock().unwrap().is_empty());
+        assert!(!flag_path(&person, AgentId::ClaudeCode).exists());
+
+        // The next hook finds the file.
+        let later = CredentialStore::file_noting(config, Arc::new(NeverRead::default()));
+        assert_eq!(later.read(AgentId::ClaudeCode).unwrap().access_token, "from-keychain");
     }
 
     #[test]
